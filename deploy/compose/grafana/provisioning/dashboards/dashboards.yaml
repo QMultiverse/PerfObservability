@@ -1,0 +1,15 @@
+apiVersion: 1
+
+providers:
+  - name: payment-hub
+    orgId: 1
+    folder: Payment Hub
+    type: file
+    disableDeletion: false
+    # Editing in the UI is fine for exploring, but the file wins on restart:
+    # the JSON in git is the source of truth.
+    allowUiUpdates: true
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,67 @@
+# Scrapes the Hub, the ESS and (later) the exporters.
+#
+# Static targets, on purpose: a local stack has a known set of hostnames, and
+# handing Prometheus the Docker socket for service discovery is a privilege it
+# does not need here. A real perf environment uses Kubernetes SD instead
+# (docs/performance-testing.md section 3.4).
+#
+# Targets that are not in the active COMPOSE_PROFILES show as up=0. That is
+# expected and useful: `up` tells you which topology is running.
+
+global:
+  scrape_interval: 5s      # perf runs need finer resolution than the 15s default
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+  external_labels:
+    # run_id belongs HERE, as an external label, never as a per-metric label:
+    # hub_kafka_consumer_lag alone is ~2,600 series at 24 partitions, and a
+    # nightly run_id on every series would kill Prometheus within a month.
+    # perfctl rewrites this per run.
+    env: local
+    run_id: "${RUN_ID:-adhoc}"
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # --------------------------------------------------- the Hub, all-in-one
+  - job_name: hub
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["hub:9464"]
+        labels: {topology: solo}
+
+  # ------------------------------------------- the Hub, one pod per stage
+  - job_name: hub-stages
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "hub-edge:9464"
+          - "hub-fin-parser:9464"
+          - "hub-mx-parser:9464"
+          - "hub-screening:9464"
+          - "hub-routing:9464"
+          - "hub-settlement:9464"
+          - "hub-dispatcher-fin:9464"
+          - "hub-dispatcher-mx:9464"
+          - "hub-ack-matcher:9464"
+          - "hub-status-api:9464"
+          - "hub-db-sink:9464"
+          - "hub-retry:9464"
+        labels: {topology: stages}
+    relabel_configs:
+      # Drop the port so `instance` reads as the container name.
+      - source_labels: [__address__]
+        regex: "([^:]+):.*"
+        target_label: instance
+        replacement: "$1"
+
+  # ------------------------------- External Systems Simulator (FIN/SnF/FCC)
+  - job_name: ess
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ess:9464"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

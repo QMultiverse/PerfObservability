@@ -1,0 +1,72 @@
+{
+  "index_patterns": ["logs-payments-*"],
+  "data_stream": {},
+  "priority": 500,
+  "_meta": {
+    "description": "Payment tracking events. Field mappings follow design doc section 9: payment.* is keyword, so a UETR search is exact and cheap."
+  },
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "logs-payments",
+      "index.number_of_shards": 1,
+      "index.number_of_replicas": 0,
+      "index.codec": "best_compression",
+      "index.refresh_interval": "10s",
+      "index.mapping.total_fields.limit": 2000
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "message": { "type": "match_only_text" },
+        "log.level": { "type": "keyword" },
+        "log.logger": { "type": "keyword" },
+
+        "service.name": { "type": "keyword" },
+        "service.environment": { "type": "keyword" },
+        "service.version": { "type": "keyword" },
+        "service.node.name": { "type": "keyword" },
+
+        "event.action": { "type": "keyword" },
+        "event.outcome": { "type": "keyword" },
+        "event.duration": { "type": "long" },
+
+        "trace.id": { "type": "keyword" },
+        "span.id": { "type": "keyword" },
+
+        "payment.uetr": { "type": "keyword" },
+        "payment.format": { "type": "keyword" },
+        "payment.msg_type": { "type": "keyword" },
+        "payment.flow": { "type": "keyword" },
+        "payment.biz_msg_id": { "type": "keyword" },
+        "payment.trace": { "type": "keyword" },
+        "payment.state": { "type": "keyword" },
+        "payment.state_reason": { "type": "keyword", "ignore_above": 512 },
+        "payment.retry_target": { "type": "keyword" },
+        "payment.retry_attempt": { "type": "short" },
+        "run.id": { "type": "keyword" },
+
+        "rpc.method": { "type": "keyword" },
+        "rpc.grpc.status_code": { "type": "keyword" },
+        "rpc.retry_count": { "type": "short" },
+
+        "messaging.system": { "type": "keyword" },
+        "messaging.destination": { "type": "keyword" },
+        "messaging.source": { "type": "keyword" },
+        "messaging.kafka.partition": { "type": "integer" },
+        "messaging.kafka.offset": { "type": "long" },
+        "messaging.kafka.consumer.group": { "type": "keyword" },
+        "messaging.kafka.consumer.lag": { "type": "long" },
+        "messaging.message.body.size": { "type": "long" },
+
+        "error.code": { "type": "keyword" },
+        "error.type": { "type": "keyword" },
+        "error.message": { "type": "match_only_text" },
+        "error.stack_trace": { "type": "text", "index": false },
+
+        "client.address": { "type": "keyword" },
+        "server.address": { "type": "keyword" }
+      }
+    }
+  }
+}

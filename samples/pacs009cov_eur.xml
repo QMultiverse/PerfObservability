@@ -1,0 +1,81 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pacs.009.001.08">
+  <FICdtTrf>
+    <GrpHdr>
+      <MsgId>BIZ9566414690</MsgId>
+      <CreDtTm>2026-09-28T10:15:02Z</CreDtTm>
+      <NbOfTxs>1</NbOfTxs>
+      <TtlIntrBkSttlmAmt Ccy="EUR">750000.00</TtlIntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-09-28</IntrBkSttlmDt>
+      <SttlmInf>
+        <SttlmMtd>COVE</SttlmMtd>
+      </SttlmInf>
+    </GrpHdr>
+    <CdtTrfTxInf>
+      <PmtId>
+        <InstrId>INS3097177679</InstrId>
+        <EndToEndId>E2E3842108571</EndToEndId>
+        <UETR>a341f7d1-92ba-49d4-b165-7729e04a52fd</UETR>
+      </PmtId>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>G001</Cd>
+        </SvcLvl>
+      </PmtTpInf>
+      <IntrBkSttlmAmt Ccy="EUR">750000.00</IntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-09-28</IntrBkSttlmDt>
+      <InstdAmt Ccy="EUR">750000.00</InstdAmt>
+      <ChrgBr>SHAR</ChrgBr>
+      <InstgAgt>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+        </FinInstnId>
+      </InstgAgt>
+      <InstdAgt>
+        <FinInstnId>
+          <BICFI>TESTNL2AXXX</BICFI>
+          <Nm>TEST BANK AMSTERDAM</Nm>
+        </FinInstnId>
+      </InstdAgt>
+      <Dbtr>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+          <PstlAdr>
+            <TwnNm>NEW YORK</TwnNm>
+            <Ctry>US</Ctry>
+          </PstlAdr>
+        </FinInstnId>
+      </Dbtr>
+      <DbtrAgt>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+        </FinInstnId>
+      </DbtrAgt>
+      <CdtrAgt>
+        <FinInstnId>
+          <BICFI>TESTNL2AXXX</BICFI>
+          <Nm>TEST BANK AMSTERDAM</Nm>
+        </FinInstnId>
+      </CdtrAgt>
+      <Cdtr>
+        <FinInstnId>
+          <BICFI>TESTNL2AXXX</BICFI>
+          <Nm>TEST BANK AMSTERDAM</Nm>
+          <PstlAdr>
+            <TwnNm>AMSTERDAM</TwnNm>
+            <Ctry>NL</Ctry>
+          </PstlAdr>
+        </FinInstnId>
+      </Cdtr>
+      <Purp>
+        <Cd>GDDS</Cd>
+      </Purp>
+      <RmtInf>
+        <Ustrd>INVOICE 85057</Ustrd>
+      </RmtInf>
+    <UndrlygCstmrCdtTrf><Dbtr><Nm>CEDARWOOD SUPPLIES INC</Nm><PstlAdr><TwnNm>NEW YORK</TwnNm><Ctry>US</Ctry><AdrLine>200 MARKET STREET</AdrLine></PstlAdr></Dbtr><DbtrAcct><Id><Othr><Id>1955309040</Id></Othr></Id></DbtrAcct><DbtrAgt><FinInstnId><BICFI>TESTUS33XXX</BICFI><Nm>TEST BANK NEW YORK</Nm></FinInstnId></DbtrAgt><CdtrAgt><FinInstnId><BICFI>TESTNL2AXXX</BICFI><Nm>TEST BANK AMSTERDAM</Nm></FinInstnId></CdtrAgt><Cdtr><Nm>MERIDIAN EXPORTS BV</Nm><PstlAdr><TwnNm>AMSTERDAM</TwnNm><Ctry>NL</Ctry><AdrLine>31 HAVENKADE</AdrLine></PstlAdr></Cdtr><CdtrAcct><Id><IBAN>NL40TEST5714314173</IBAN></Id></CdtrAcct><InstdAmt Ccy="EUR">750000.00</InstdAmt><RmtInf><Ustrd>INVOICE 74000</Ustrd></RmtInf></UndrlygCstmrCdtTrf></CdtTrfTxInf>
+  </FICdtTrf>
+</Document>

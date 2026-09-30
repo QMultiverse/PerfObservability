@@ -1,0 +1,21 @@
+{
+  "policy": {
+    "_meta": {
+      "description": "Payment tracking logs. Local safety net from design doc section 9.1: roll over at 2 GB, delete after a day, so a long functional session cannot fill the WSL2 virtual disk."
+    },
+    "phases": {
+      "hot": {
+        "actions": {
+          "rollover": {
+            "max_primary_shard_size": "2gb",
+            "max_age": "1d"
+          }
+        }
+      },
+      "delete": {
+        "min_age": "1d",
+        "actions": { "delete": {} }
+      }
+    }
+  }
+}

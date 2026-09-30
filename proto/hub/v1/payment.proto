@@ -1,0 +1,283 @@
+// The canonical payment model and the Kafka envelopes built on it.
+//
+// MT and MX are parsed into Payment by separate services; everything
+// downstream of hub.pay.canonical works on this model only. Raw MT/MX bytes
+// stay on the *.raw topics and are reachable through RawRef (claim check).
+//
+// Money is always a decimal string. Never a float, anywhere.
+syntax = "proto3";
+
+package hub.v1;
+
+import "hub/v1/common.proto";
+
+option java_multiple_files = true;
+option java_package = "com.bank.hub.v1";
+
+// ------------------------------------------------------------ value types
+message Money {
+  string currency = 1;  // ISO 4217
+  string amount = 2;    // decimal string, e.g. "1234.56"
+}
+
+message PostalAddress {
+  string country = 1;
+  string town = 2;
+  string post_code = 3;
+  repeated string address_line = 4;
+}
+
+message Account {
+  string iban = 1;
+  string other_id = 2;  // when not an IBAN
+  string currency = 3;
+}
+
+message Party {
+  string name = 1;
+  string bic = 2;  // BIC8 or BIC11
+  Account account = 3;
+  PostalAddress address = 4;
+  string lei = 5;
+  string clearing_system_id = 6;  // e.g. a national sort code
+}
+
+// -------------------------------------------------------- canonical model
+message Payment {
+  MsgRef ref = 1;
+  Format format = 2;  // lane this payment arrived on
+  Network inbound_network = 3;
+  Direction direction = 4;
+
+  // Identifiers
+  string biz_msg_id = 10;     // MT :20: / MX BizMsgIdr
+  string instr_id = 11;       // MX InstrId
+  string end_to_end_id = 12;  // MX EndToEndId / MT :21:
+  string tx_id = 13;          // MX TxId
+
+  // Amounts and dates
+  Money interbank_settlement_amount = 20;
+  Money instructed_amount = 21;
+  string interbank_settlement_date = 22;  // ISO 8601 date
+  string charge_bearer = 23;              // DEBT | CRED | SHAR | SLEV
+  repeated Money charges = 24;
+  string exchange_rate = 25;
+
+  // Parties
+  Party debtor = 30;
+  Party debtor_agent = 31;
+  Party creditor = 32;
+  Party creditor_agent = 33;
+  repeated Party intermediary_agent = 34;
+  Party instructing_agent = 35;
+  Party instructed_agent = 36;
+
+  // Payment detail
+  string remittance_info = 40;
+  string purpose_code = 41;
+  repeated string instruction_for_next_agent = 42;
+  repeated string instruction_for_creditor_agent = 43;
+  string local_instrument = 44;
+  string service_level = 45;      // e.g. G001 for gpi
+  string settlement_method = 46;  // INDA | INGA | COVE | CLRG
+
+  // Provenance
+  int64 network_ts_ns = 50;
+  string sender_bic = 51;
+  string receiver_bic = 52;
+  RawRef raw = 53;
+
+  // Cover method: the linked leg, if any. Both legs share the UETR.
+  CoverLink cover = 60;
+}
+
+// A cover payment is two messages under one UETR: the instruction leg
+// (pacs.008 / MT103) and the cover leg (pacs.009 COV / MT202 COV).
+message CoverLink {
+  enum Leg {
+    LEG_UNSPECIFIED = 0;
+    INSTRUCTION = 1;  // pacs.008 / MT103
+    COVER = 2;        // pacs.009 COV / MT202 COV
+  }
+  Leg leg = 1;
+  string partner_msg_type = 2;
+  bool partner_present = 3;
+}
+
+// ------------------------------------------------------------ stage detail
+message Screening {
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    NO_HIT = 1;
+    HIT_PENDING = 2;
+    BLOCK = 3;
+    RELEASED = 4;  // HIT_PENDING later released by NotifyFccDecision
+  }
+  Outcome outcome = 1;
+  string case_id = 2;
+  repeated string matched_parties = 3;
+  string reason = 4;
+  int64 screened_ns = 5;
+  int64 decided_ns = 6;
+}
+
+message Route {
+  Network network = 1;         // FIN or SNF
+  Format outbound_format = 2;  // decided here, not by the inbound lane
+  string outbound_msg_type = 3;
+  string receiver_bic = 4;
+  string requestor_dn = 5;
+  string responder_dn = 6;
+  string reason = 7;    // why this route
+  bool translated = 8;  // true for an in-flow MT to MX translation
+  string cut_off_window = 9;
+}
+
+message Settlement {
+  string ledger_ref = 1;
+  string value_date = 2;
+  Money posted_amount = 3;
+  int64 posted_ns = 4;
+}
+
+message Dispatch {
+  string send_ref = 1;  // ISN (FIN) or SnF ref
+  int32 attempts = 2;
+  int64 handoff_ns = 3;
+  bool acked = 4;
+  string nak_code = 5;
+}
+
+// Stage timestamps, T0-T6 in design doc section 5. Nanoseconds since the
+// epoch; the performance framework reads them from hub.pay.status.
+message Timings {
+  int64 t0_network_sent_ns = 1;
+  int64 t1_edge_accepted_ns = 2;
+  int64 t2_canonical_ns = 3;
+  int64 t3_screen_reply_ns = 4;
+  int64 t4_handoff_ns = 5;
+  int64 t5_network_ack_ns = 6;
+  int64 t6_completed_ns = 7;
+}
+
+enum PaymentState {
+  PAYMENT_STATE_UNSPECIFIED = 0;
+  RECEIVED = 1;        // durable on hub.in.*.raw, edge has replied
+  PARSED = 2;          // canonical model built
+  SCREENED = 3;        // FCC returned NO_HIT, or the hit was released
+  HELD = 4;            // FCC returned HIT_PENDING; awaiting NotifyFccDecision
+  BLOCKED = 5;         // FCC BLOCK, or a held payment blocked by the analyst
+  AWAITING_COVER = 6;  // one leg present, waiting for its partner
+  ROUTED = 7;
+  SETTLED = 8;
+  DISPATCHED = 9;  // handed to FIN / SnF, awaiting the network ACK
+  COMPLETED = 10;  // network ACK received
+  REJECTED = 11;   // NAK, validation failure, or a business reject
+  FAILED = 12;     // technical failure; retried, then dead-lettered
+}
+
+// ---------------------------------------------------------- Kafka records
+// The envelope on hub.pay.canonical, .screened, .routed and hub.out.*.
+message PaymentEnvelope {
+  MsgRef ref = 1;
+  Format format = 2;
+  Payment payment = 3;
+  Screening screening = 4;
+  Route route = 5;
+  Settlement settlement = 6;
+  Dispatch dispatch = 7;
+  PaymentState state = 8;
+  Timings timings = 9;
+  string trace_level = 10;  // full | standard | minimal | errors | none
+  string run_id = 11;       // test only
+  int32 retry_count = 12;
+}
+
+// hub.out.fin / hub.out.mx: the serialised outbound message plus its context.
+message OutboundMessage {
+  PaymentEnvelope envelope = 1;
+  Format format = 2;
+  bytes fin_message = 3;  // set when format = MT
+  bytes app_hdr = 4;      // set when format = MX
+  bytes document = 5;     // set when format = MX
+  string receiver_bic = 6;
+  string requestor_dn = 7;
+  string responder_dn = 8;
+  bool request_delivery_notification = 9;
+}
+
+// hub.pay.status: one record per state change. The system of record
+// (PostgreSQL, via cg-db-sink) and the status API are both built from these.
+message StatusEvent {
+  MsgRef ref = 1;
+  Format format = 2;
+  PaymentState state = 3;
+  string service = 4;  // which Hub service emitted it
+  string reason = 5;
+  int64 emitted_ns = 6;
+  Timings timings = 7;
+  string run_id = 8;
+  string error_code = 9;
+}
+
+// hub.pay.state (compacted): the latest state per UETR, so a processor can
+// rebuild its local state store on restart.
+message PaymentStateRecord {
+  MsgRef ref = 1;
+  Format format = 2;
+  PaymentState state = 3;
+  PaymentEnvelope envelope = 4;     // last known full envelope
+  int64 updated_ns = 5;
+  repeated string stages_done = 6;  // idempotency: "parsed", "screened", ...
+}
+
+// hub.in.fin.raw / hub.in.mx.raw: exactly what the network delivered.
+message RawInbound {
+  MsgRef ref = 1;
+  Format format = 2;
+  bytes fin_message = 3;  // MT lane
+  bytes app_hdr = 4;      // MX lane
+  bytes document = 5;     // MX lane
+  string sender_bic = 6;
+  string snf_ref = 7;
+  int64 network_ts_ns = 8;
+  int64 received_ns = 9;
+  string trace_level = 10;
+  string run_id = 11;
+}
+
+// hub.net.ack: network ACK / NAK and SnF delivery notifications.
+message NetworkAckRecord {
+  MsgRef ref = 1;
+  Network network = 2;
+  bool ack = 3;
+  string error_code = 4;
+  string send_ref = 5;
+  bool delivery_notification = 6;
+  bool delivered = 7;
+  int64 network_ts_ns = 8;
+  int64 received_ns = 9;
+}
+
+// hub.fcc.decision: analyst decisions for held payments.
+message FccDecisionRecord {
+  MsgRef ref = 1;
+  string case_id = 2;
+  bool release = 3;
+  string reason = 4;
+  int64 decided_ns = 5;
+  int64 received_ns = 6;
+}
+
+// <topic>.retry.30s, <topic>.retry.5m and <topic>.dlq
+message FailedRecord {
+  MsgRef ref = 1;
+  string origin_topic = 2;
+  bytes payload = 3;
+  string error_type = 4;
+  string error_message = 5;
+  int32 attempt = 6;
+  int64 first_failed_ns = 7;
+  int64 failed_ns = 8;
+  string consumer_group = 9;
+}

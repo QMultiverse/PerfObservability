@@ -1,0 +1,89 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pacs.008.001.08">
+  <FIToFICstmrCdtTrf>
+    <GrpHdr>
+      <MsgId>BIZ6486587047</MsgId>
+      <CreDtTm>2026-09-28T10:15:02Z</CreDtTm>
+      <NbOfTxs>1</NbOfTxs>
+      <TtlIntrBkSttlmAmt Ccy="USD">98765.43</TtlIntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-09-28</IntrBkSttlmDt>
+      <SttlmInf>
+        <SttlmMtd>INDA</SttlmMtd>
+      </SttlmInf>
+    </GrpHdr>
+    <CdtTrfTxInf>
+      <PmtId>
+        <InstrId>INS9572085887</InstrId>
+        <EndToEndId>E2E9990058424</EndToEndId>
+        <UETR>215dc562-24d0-45b2-b88f-dce3e638bca4</UETR>
+      </PmtId>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>G001</Cd>
+        </SvcLvl>
+      </PmtTpInf>
+      <IntrBkSttlmAmt Ccy="USD">98765.43</IntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-09-28</IntrBkSttlmDt>
+      <InstdAmt Ccy="USD">98765.43</InstdAmt>
+      <ChrgBr>SHAR</ChrgBr>
+      <InstgAgt>
+        <FinInstnId>
+          <BICFI>TESTGB2LXXX</BICFI>
+          <Nm>TEST BANK LONDON</Nm>
+        </FinInstnId>
+      </InstgAgt>
+      <InstdAgt>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+        </FinInstnId>
+      </InstdAgt>
+      <Dbtr>
+        <Nm>MERIDIAN EXPORTS BV</Nm>
+        <PstlAdr>
+          <TwnNm>AMSTERDAM</TwnNm>
+          <Ctry>NL</Ctry>
+          <AdrLine>31 HAVENKADE</AdrLine>
+        </PstlAdr>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <IBAN>NL65TEST0330609829</IBAN>
+        </Id>
+      </DbtrAcct>
+      <DbtrAgt>
+        <FinInstnId>
+          <BICFI>TESTGB2LXXX</BICFI>
+          <Nm>TEST BANK LONDON</Nm>
+        </FinInstnId>
+      </DbtrAgt>
+      <CdtrAgt>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+        </FinInstnId>
+      </CdtrAgt>
+      <Cdtr>
+        <Nm>CEDARWOOD SUPPLIES INC</Nm>
+        <PstlAdr>
+          <TwnNm>NEW YORK</TwnNm>
+          <Ctry>US</Ctry>
+          <AdrLine>200 MARKET STREET</AdrLine>
+        </PstlAdr>
+      </Cdtr>
+      <CdtrAcct>
+        <Id>
+          <Othr>
+            <Id>2474189794</Id>
+          </Othr>
+        </Id>
+      </CdtrAcct>
+      <Purp>
+        <Cd>GDDS</Cd>
+      </Purp>
+      <RmtInf>
+        <Ustrd>INVOICE 76862</Ustrd>
+      </RmtInf>
+    </CdtTrfTxInf>
+  </FIToFICstmrCdtTrf>
+</Document>

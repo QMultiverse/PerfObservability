@@ -1,0 +1,49 @@
+# Recording rules for the figures a dashboard should not recompute every refresh.
+groups:
+  - name: payment-hub-throughput
+    interval: 5s
+    rules:
+      # ---------------------------------------------------------- throughput
+      # Transactions per second, from the Hub's own state counter. A stand-in
+      # until ess_transactions_total exists: that one counts the ESS's
+      # independent view at T4 (handoff) and T6 (completed), which is what
+      # performance-testing.md 2.1 makes authoritative.
+      - record: hub:received_tps
+        expr: sum by (format) (rate(hub_payments_state_total{state="RECEIVED"}[1m]))
+
+      - record: hub:completed_tps
+        expr: sum by (format) (rate(hub_payments_state_total{state="COMPLETED"}[1m]))
+
+      # Achieved ratio — the >= 0.98 SLO. Guarded so it reads 0 rather than
+      # vanishing when no load is running.
+      - record: hub:achieved_ratio
+        expr: |
+          sum(rate(hub_payments_state_total{state="COMPLETED"}[1m]))
+            / clamp_min(sum(rate(hub_payments_state_total{state="RECEIVED"}[1m])), 0.0001)
+
+      # ------------------------------------------------------- back-pressure
+      # Little's law, at the level that matters: payments accepted but not yet
+      # terminal. A flat line means the Hub is keeping up; a rising line means
+      # it is not, whatever the latency percentiles say.
+      #
+      # NOT produced-minus-consumed per topic: hub.pay.status and
+      # hub.pay.state each have two consumer groups, so consumed legitimately
+      # exceeds produced and that subtraction goes negative.
+      - record: hub:payments_inflight
+        expr: |
+          sum(hub_payments_state_total{state="RECEIVED"})
+            - sum(hub_payments_state_total{state=~"COMPLETED|REJECTED|BLOCKED"})
+
+      # Lag summed across partitions, which is what a human reads.
+      - record: hub:consumer_lag_messages
+        expr: sum by (group, topic) (hub_kafka_consumer_lag)
+
+      # ------------------------------------------------------------- errors
+      # `or vector(0)` so the panel shows zero before the first error rather
+      # than an empty graph.
+      - record: hub:error_ratio
+        expr: |
+          (
+            sum(rate(hub_payments_errors_total[1m])) or vector(0)
+          )
+            / clamp_min(sum(rate(hub_payments_state_total{state="RECEIVED"}[1m])), 0.0001)

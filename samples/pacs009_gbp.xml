@@ -1,0 +1,81 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pacs.009.001.08">
+  <FICdtTrf>
+    <GrpHdr>
+      <MsgId>BIZ4328345706</MsgId>
+      <CreDtTm>2026-09-28T10:15:02Z</CreDtTm>
+      <NbOfTxs>1</NbOfTxs>
+      <TtlIntrBkSttlmAmt Ccy="GBP">2500000.00</TtlIntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-09-28</IntrBkSttlmDt>
+      <SttlmInf>
+        <SttlmMtd>INDA</SttlmMtd>
+      </SttlmInf>
+    </GrpHdr>
+    <CdtTrfTxInf>
+      <PmtId>
+        <InstrId>INS7950268321</InstrId>
+        <EndToEndId>E2E9850907202</EndToEndId>
+        <UETR>d84cf328-e92d-424d-9482-dde9c5cc618b</UETR>
+      </PmtId>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>G001</Cd>
+        </SvcLvl>
+      </PmtTpInf>
+      <IntrBkSttlmAmt Ccy="GBP">2500000.00</IntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-09-28</IntrBkSttlmDt>
+      <InstdAmt Ccy="GBP">2500000.00</InstdAmt>
+      <ChrgBr>SHAR</ChrgBr>
+      <InstgAgt>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+        </FinInstnId>
+      </InstgAgt>
+      <InstdAgt>
+        <FinInstnId>
+          <BICFI>TESTGB2LXXX</BICFI>
+          <Nm>TEST BANK LONDON</Nm>
+        </FinInstnId>
+      </InstdAgt>
+      <Dbtr>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+          <PstlAdr>
+            <TwnNm>NEW YORK</TwnNm>
+            <Ctry>US</Ctry>
+          </PstlAdr>
+        </FinInstnId>
+      </Dbtr>
+      <DbtrAgt>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+        </FinInstnId>
+      </DbtrAgt>
+      <CdtrAgt>
+        <FinInstnId>
+          <BICFI>TESTGB2LXXX</BICFI>
+          <Nm>TEST BANK LONDON</Nm>
+        </FinInstnId>
+      </CdtrAgt>
+      <Cdtr>
+        <FinInstnId>
+          <BICFI>TESTGB2LXXX</BICFI>
+          <Nm>TEST BANK LONDON</Nm>
+          <PstlAdr>
+            <TwnNm>LONDON</TwnNm>
+            <Ctry>GB</Ctry>
+          </PstlAdr>
+        </FinInstnId>
+      </Cdtr>
+      <Purp>
+        <Cd>GDDS</Cd>
+      </Purp>
+      <RmtInf>
+        <Ustrd>INVOICE 19004</Ustrd>
+      </RmtInf>
+    </CdtTrfTxInf>
+  </FICdtTrf>
+</Document>

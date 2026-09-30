@@ -1,0 +1,385 @@
+# The Payment Hub stack. One file, run from the repository root:
+#
+#   docker compose up -d          # everything, no -f needed
+#   docker compose logs -f hub
+#   docker compose down           # wipes all local data (no named volumes)
+#
+# Which services start is chosen by COMPOSE_PROFILES in .env:
+#
+#   solo,obs,elk  the default — the whole Hub in one container, metrics and logs
+#   solo,obs      Prometheus and Grafana without Elasticsearch (saves ~4 GB)
+#   solo          the lightest thing that runs payments
+#   stages,obs,elk the production-shaped topology, one container per stage
+#
+# Profiles:  solo | stages  = which Hub topology (alternatives, not additive)
+#            obs            = Prometheus + Grafana (metrics and dashboards)
+#            elk            = Elasticsearch + Kibana + Filebeat (logs)
+#
+# `solo` and `stages` are alternatives — the all-in-one container and the
+# per-stage containers join the same consumer groups, so running both just
+# splits the partitions between them for no benefit.
+#
+# Sized for a 16 GB Windows machine on Docker Desktop / WSL2, per design doc
+# section 9.1. Set memory=10GB and swap=4GB in %UserProfile%\.wslconfig, and
+# vm.max_map_count=262144 inside WSL2, before starting.
+#
+# THROWAWAY DATA: there are no named volumes anywhere in this file, so
+# `docker compose down` removes every container and all the logs with them.
+# `docker compose stop` keeps them for when you want to come back.
+
+name: payment-hub
+
+x-hub-env: &hub-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_PARTITIONS: "4"
+  KAFKA_REPLICATION: "1"
+  ESS_TARGET: ess:9101
+  HUB_TRACKING_MODE: ${HUB_TRACKING_MODE:-functional}
+  HUB_LOG_LEVEL: ${HUB_LOG_LEVEL:-INFO}
+  HUB_ENV: local
+  HUB_VERSION: ${HUB_VERSION:-0.1.0}
+  HUB_METRICS_PORT: "9464"
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+
+x-image: &image
+  image: payment-hub:dev
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+# Filebeat picks ECS JSON off container stdout; these labels mark ours.
+x-log-labels: &log-labels
+  co.elastic.logs/json.keys_under_root: "true"
+  co.elastic.logs/json.overwrite_keys: "true"
+
+# A per-stage container. Only used by the `stages` profile.
+x-stage: &stage
+  <<: *image
+  restart: unless-stopped
+  profiles: ["stages"]
+  depends_on:
+    kafka-init:
+      condition: service_completed_successfully
+  environment: *hub-env
+  mem_limit: 220m
+  labels: *log-labels
+
+services:
+  # =================================================================== Kafka
+  kafka:
+    image: apache/kafka:3.8.1
+    container_name: hub-kafka
+    environment:
+      # Single-broker KRaft: no ZooKeeper, no separate controller.
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # One broker cannot satisfy replication 3, so everything is 1 locally.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_LOG_RETENTION_HOURS: "24"
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx1g
+      CLUSTER_ID: hub-local-cluster-0001
+    ports: ["29092:29092"]
+    mem_limit: 1500m
+    healthcheck:
+      # This spawns a JVM, which takes its time when Elasticsearch is starting
+      # on the same machine. A 5s timeout fails here for no good reason.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 25s
+      retries: 10
+      start_period: 30s
+
+  # Creates the topic catalogue — the retry ladder and the compacted state
+  # topic included — then exits. Everything else waits for it.
+  kafka-init:
+    <<: *image
+    container_name: hub-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      <<: *hub-env
+      KAFKA_CREATE_TOPICS: "true"
+    entrypoint: ["python", "scripts/create_topics.py"]
+    healthcheck:
+      disable: true
+
+  # ============================================================== the Hub
+  # The whole pipeline in one container: the gRPC edge, every stage on its own
+  # thread, and the status API. Same consumer groups as the `stages` profile.
+  hub:
+    <<: *image
+    container_name: hub
+    profiles: ["solo"]
+    command: ["hub", "all"]
+    restart: unless-stopped
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *hub-env
+      HUB_GRPC_PORT: "8443"
+      HUB_DATABASE_URL: postgresql://hub:hub@postgres:5432/payments
+    ports:
+      - "8443:8443"   # gRPC edge
+      - "8080:8080"   # status API
+      - "9464:9464"   # /metrics
+    mem_limit: 700m
+    labels: *log-labels
+
+  # ------------------------------ the same thing, one container per stage --
+  hub-edge:
+    <<: *stage
+    container_name: hub-edge
+    command: ["hub", "edge"]
+    environment:
+      <<: *hub-env
+      HUB_GRPC_PORT: "8443"
+    ports: ["8443:8443"]
+    mem_limit: 280m
+
+  hub-fin-parser:
+    <<: *stage
+    container_name: hub-fin-parser
+    command: ["hub", "fin-parser"]
+
+  hub-mx-parser:
+    <<: *stage
+    container_name: hub-mx-parser
+    command: ["hub", "mx-parser"]
+    # The MX lane carries the XML parse and the CBPR+ checks: the most
+    # expensive stage, and the first one to give more room.
+    mem_limit: 320m
+
+  hub-screening:
+    <<: *stage
+    container_name: hub-screening
+    command: ["hub", "screening"]
+
+  hub-routing:
+    <<: *stage
+    container_name: hub-routing
+    command: ["hub", "routing"]
+
+  hub-settlement:
+    <<: *stage
+    container_name: hub-settlement
+    command: ["hub", "settlement"]
+
+  hub-dispatcher-fin:
+    <<: *stage
+    container_name: hub-dispatcher-fin
+    command: ["hub", "dispatcher-fin"]
+
+  hub-dispatcher-mx:
+    <<: *stage
+    container_name: hub-dispatcher-mx
+    command: ["hub", "dispatcher-mx"]
+
+  hub-ack-matcher:
+    <<: *stage
+    container_name: hub-ack-matcher
+    command: ["hub", "ack-matcher"]
+
+  hub-status-api:
+    <<: *stage
+    container_name: hub-status-api
+    command: ["hub", "status-api"]
+    ports: ["8080:8080"]
+
+  hub-db-sink:
+    <<: *stage
+    container_name: hub-db-sink
+    command: ["hub", "db-sink"]
+    environment:
+      <<: *hub-env
+      HUB_DATABASE_URL: postgresql://hub:hub@postgres:5432/payments
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  hub-retry:
+    <<: *stage
+    container_name: hub-retry
+    command: ["hub", "retry"]
+
+  # ========================== External Systems Simulator (FIN, SnF, FCC) ==
+  ess:
+    <<: *image
+    container_name: hub-ess
+    restart: unless-stopped
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - "ess.cli"
+      - "serve"
+      - "--mode"
+      - "${ESS_MODE:-functional}"
+      - "--hub"
+      - "${HUB_EDGE:-hub:8443}"
+      - "--status-api"
+      - "${HUB_STATUS_API:-http://hub:8080}"
+    environment:
+      <<: *hub-env
+      ESS_MODE: ${ESS_MODE:-functional}
+      ESS_PORT: "9101"
+    ports: ["9101:9101"]
+    mem_limit: 300m
+    labels: *log-labels
+
+  # ================================================================ storage
+  postgres:
+    image: postgres:16-alpine
+    container_name: hub-postgres
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: hub
+      POSTGRES_PASSWORD: hub # local only
+    ports: ["5432:5432"]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hub -d payments"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ========================================================== observability
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-8.15.3}
+    container_name: hub-elasticsearch
+    profiles: ["elk"]
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1536m -Xmx1536m
+      - xpack.ml.enabled=false
+      - xpack.security.enabled=false # local only; keep security on in shared environments
+      - action.destructive_requires_name=false
+      - cluster.routing.allocation.disk.watermark.low=90%
+      - cluster.routing.allocation.disk.watermark.high=95%
+      - cluster.routing.allocation.disk.watermark.flood_stage=97%
+    mem_limit: 3g
+    ports: ["9200:9200"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+  # Installs the ILM policy (roll over at 2 GB, delete after a day) and the
+  # index template that maps every payment.* field as a keyword.
+  es-init:
+    image: curlimages/curl:8.10.1
+    container_name: hub-es-init
+    profiles: ["elk"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./deploy/compose/elasticsearch/ilm-policy.json:/tmp/ilm-policy.json:ro
+      - ./deploy/compose/elasticsearch/index-template.json:/tmp/index-template.json:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        curl -fsS -XPUT http://elasticsearch:9200/_ilm/policy/logs-payments \
+          -H 'Content-Type: application/json' -d @/tmp/ilm-policy.json
+        curl -fsS -XPUT http://elasticsearch:9200/_index_template/logs-payments \
+          -H 'Content-Type: application/json' -d @/tmp/index-template.json
+        echo "elasticsearch: ILM policy and index template installed"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION:-8.15.3}
+    container_name: hub-kibana
+    profiles: ["elk"]
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - NODE_OPTIONS=--max-old-space-size=1024
+      - TELEMETRY_ENABLED=false
+    mem_limit: 1g
+    ports: ["5601:5601"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELASTIC_VERSION:-8.15.3}
+    container_name: hub-filebeat
+    profiles: ["elk"]
+    user: root
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      # Read-only mounts of the container logs. Not data storage: nothing here
+      # survives `down`.
+      - ./deploy/compose/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    mem_limit: 256m
+    depends_on:
+      es-init:
+        condition: service_completed_successfully
+
+  # ============================================= metrics and dashboards ==
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: hub-prometheus
+    profiles: ["obs"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # A perf run is minutes to hours, not months. Short retention keeps the
+      # WSL2 virtual disk from growing without bound.
+      - --storage.tsdb.retention.time=24h
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/compose/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/compose/prometheus/rules:/etc/prometheus/rules:ro
+    ports: ["9090:9090"]
+    mem_limit: 600m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9090/-/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    # No volumes for the TSDB: `down` wipes the metrics with everything else.
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: hub-grafana
+    profiles: ["obs"]
+    environment:
+      # Local only. There is nothing sensitive here and a login prompt between
+      # you and a dashboard during a run is pure friction.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_USERS_DEFAULT_THEME: dark
+      # Land on the run overview instead of the welcome page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/01-run-overview.json
+    volumes:
+      - ./deploy/compose/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    mem_limit: 400m
+    depends_on:
+      prometheus:
+        condition: service_healthy

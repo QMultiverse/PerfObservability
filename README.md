@@ -1,0 +1,388 @@
+# Payment Hub
+
+A cross-border payment hub that ingests, validates, screens, routes and settles
+payments arriving as SWIFT **MT** over FIN (MT103, MT202, MT202 COV) or **MX** /
+ISO 20022 over SWIFTNet Store-and-Forward (pacs.008, pacs.009 incl. COV), plus
+the **External Systems Simulator (ESS)** that plays FIN, SnF and FCC so the Hub
+can be built and tested.
+
+The design is in `docs/platform-design.md`; how it gets performance-tested is in
+`docs/performance-testing.md`. `CLAUDE.md` holds the conventions. Those three
+documents are the source of truth — if the code and a doc disagree, that is a
+bug in one of them.
+
+## What is here
+
+| Part | Where | What it is |
+| --- | --- | --- |
+| The contract | `proto/` | `hub.v1`, `ext.v1`, `ess.v1`. Seven business RPCs, all unary. |
+| Canonical model | `libs/hub_model/` | The format-neutral payment, topic names, flow IDs, identifiers. |
+| Wire formats | `libs/hub_format/` | The in-house MT parser, ISO 20022 handling, both mappers, synthetic samples. |
+| Telemetry | `libs/hub_telemetry/` | Baggage, ECS logging, gRPC interceptors, Kafka wrappers, tracking levels, metrics. |
+| The Hub | `hub/` | One package per stage: `edge`, `fin_parser`, `mx_parser`, `screening`, `routing`, `settlement`, `dispatcher`, `ack_matcher`, `status_api`, `db_sink`. |
+| The simulator | `ess/` | FIN, SnF and FCC emulators, the inbound sender, the scenario engine, the recorder, `EssControl` and the `ess` CLI. |
+| Local stack | `compose.yaml` | One file, profiles for one-container or per-stage. Config in `deploy/compose/`. |
+| Tests | `tests/` | `unit/`, `contract/` (the proto, both sides), `e2e/` (whole payments). |
+
+## The pipeline
+
+```
+FIN ─DeliverFin─┐                                          ┌─SendMt─→ FIN
+                ├→ gRPC edge ─→ hub.in.{fin,mx}.raw ─→ parsers ─→ hub.pay.canonical
+SnF ─DeliverMx──┘                                              │
+                                                               ↓
+                                   FCC ←─Screen── screening ──→ hub.pay.screened
+                                    │                               ↓
+                             NotifyFccDecision                   routing
+                                    │                               ↓
+                                    ↓                           settlement
+                            hub.fcc.decision                        ↓
+                                                        hub.out.fin / hub.out.mx
+                                                                    ↓
+                                                               dispatcher ─SendMx─→ SnF
+                                                                    ↓
+                        hub.pay.status ←─ ACK matcher ←─ hub.net.ack ←─ NotifyAck
+```
+
+Four rules hold everywhere, and the tests enforce them:
+
+- **gRPC is the only external boundary.** Nothing outside the Hub writes to its
+  Kafka — not the ESS, not a test tool.
+- **Durable before acknowledged.** `Deliver*` replies `ACCEPTED` only after the
+  Kafka write with `acks=all` is confirmed. No parsing on that path.
+- **One transaction per stage.** Each processor reads, processes and writes in a
+  single Kafka transaction, offsets committed inside it.
+- **MT and MX stay apart** until `hub.pay.canonical`, and split again at
+  `hub.out.fin` / `hub.out.mx`.
+
+## Getting started
+
+### Prerequisites
+
+Python 3.12 or later, and Docker Desktop on WSL2 for the local stack. On a 16 GB
+Windows machine, set this in `%UserProfile%\.wslconfig` before anything else:
+
+```ini
+[wsl2]
+memory=10GB
+swap=4GB
+
+[experimental]
+autoMemoryReclaim=gradual
+```
+
+Then, inside WSL2 (Elasticsearch will not start without it):
+
+```bash
+sudo sysctl -w vm.max_map_count=262144
+```
+
+### Install and generate the stubs
+
+PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+python scripts\gen_proto.py       # generated code is never committed
+```
+
+WSL / bash:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+python scripts/gen_proto.py
+```
+
+### Run the tests
+
+The whole suite runs in seconds with no broker and no containers: the e2e tests
+drive the real edge, the real processors and the real simulator over an
+in-process Kafka stand-in (`hub_telemetry.memory_bus`).
+
+```powershell
+python -m pytest              # 339 tests, about 15 seconds
+python -m pytest tests/e2e    # whole payments, end to end
+python -m ruff check .
+python -m mypy hub ess libs
+```
+
+### Run the stack
+
+One file, `compose.yaml`, at the repository root — no `-f` needed:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+docker compose logs -f hub
+```
+
+That is Kafka, the topic catalogue, PostgreSQL, the whole Hub in one container,
+the ESS, and ELK: **seven containers**. Which services start is one line in
+`.env`:
+
+| `COMPOSE_PROFILES` | What runs | When to use it |
+| --- | --- | --- |
+| `solo,elk` (default) | Hub in one container + Kibana | Developing, demos, following a payment |
+| `solo` | The same without ELK | Fastest start, lowest memory |
+| `stages,elk` | One container per stage — 18 in all | Watching a consumer group scale, or anything topology-shaped |
+
+`solo` and `stages` are alternatives, not additive: both join the same consumer
+groups, so running them together just splits the partitions. Switching to
+`stages` also means pointing the ESS at the split edge:
+
+```ini
+COMPOSE_PROFILES=stages,elk
+HUB_EDGE=hub-edge:8443
+HUB_STATUS_API=http://hub-status-api:8080
+```
+
+The all-in-one container runs the gRPC edge, all eleven stages and the status
+API in one process, **each stage on its own thread** — `confluent_kafka`'s
+`consume()` blocks, so a shared event loop would serialise eleven 50 ms polls
+into half a second of latency per hop. Kafka sees no difference between the two
+profiles: same consumer groups, same topics, same transactions.
+
+### Run payments
+
+One command sends one payment; another sends a batch and tells you how it went.
+
+```powershell
+# one payment
+docker compose exec ess python -m ess.cli send --type pacs.008
+docker compose exec ess python -m ess.cli send --type MT103 --run-id MYRUN
+
+# a batch, paced, with a settlement report
+docker compose exec ess python -m ess.cli batch --count 50 --rate 10
+docker compose exec ess python -m ess.cli batch --count 100 --rate 10 --mix "pacs.008=70,MT103=30"
+docker compose exec ess python -m ess.cli batch --count 20 --rate 5 --hit-rate 0.1
+docker compose exec ess python -m ess.cli batch --count 50 --json     # for a script
+
+# a scripted scenario, asserted end to end
+docker compose exec ess python -m ess.cli case run mt103_sanctions_hit
+docker compose exec ess python -m ess.cli case run-all                # what CI runs
+```
+
+A batch reports what actually happened, not just what was sent:
+
+```
+requested 30  accepted 30  rejected 0  duplicate 0  errors 0
+sent in 2.95s at 10.2/s
+settled 30  unsettled 0  COMPLETED=30
+end to end  p50 743 ms  p95 1199 ms  max 1253 ms
+batch ok
+```
+
+`requested` always equals `accepted + duplicate + rejected + errors`, so a
+payment can never quietly disappear. A `duplicate` is a retried delivery whose
+first attempt already landed — the idempotency rule working, and a success.
+
+**This is the inbound sender, not a load generator.** Design doc section 8 gives
+high-rate load to paygen; about **10/s is the comfortable ceiling** for one
+laptop running ELK as well, and past that the 200 ms `Deliver*` deadline starts
+costing retries. Lower `--concurrency` before raising `--rate`: fewer
+deliveries in flight means fewer retries and, counter-intuitively, a higher
+achieved rate.
+
+### Follow one payment
+
+`scripts\trace-payment.ps1` does the whole walkthrough in one command — sends a
+payment, waits for it to settle, then shows it in Kafka, the status API,
+PostgreSQL and Elasticsearch, and prints a Kibana link straight to its journey:
+
+```powershell
+.\scripts\trace-payment.ps1                       # a pacs.008
+.\scripts\trace-payment.ps1 -Type MT103           # the FIN lane
+.\scripts\trace-payment.ps1 -Topic hub.pay.canonical
+```
+
+#### Doing it by hand
+
+Run these from the repository root, in PowerShell.
+
+**1. Send the payment and keep its UETR.** The UETR is the correlation key: the
+Kafka message key on every topic, and the search key in Kibana.
+
+```powershell
+$out  = docker compose exec -T ess `
+          python -m ess.cli send --type pacs.008 --run-id MYRUN
+$out
+$uetr = [string]($out | Select-Object -First 1).Trim()
+```
+
+**2. Ask the Hub where it got to.**
+
+```powershell
+Invoke-RestMethod "http://localhost:8080/payments/$uetr" | Format-List
+```
+
+`state : COMPLETED`, the seven T0-T6 timestamps, and the seven-hop history.
+
+**3. Find it in Kafka.** Swap the topic to follow it along the pipeline:
+`hub.in.mx.raw` (or `hub.in.fin.raw` for MT), `hub.pay.canonical`,
+`hub.pay.screened`, `hub.pay.routed`, `hub.out.mx`, `hub.net.ack`,
+`hub.pay.status`.
+
+```powershell
+docker exec hub-kafka /opt/kafka/bin/kafka-console-consumer.sh `
+    --bootstrap-server localhost:9092 `
+    --topic hub.in.mx.raw --from-beginning --timeout-ms 12000 `
+    --property print.key=true --property print.partition=true --property print.offset=true `
+    --property key.separator=" | " 2>$null |
+  Select-String -SimpleMatch $uetr
+```
+
+Prints `Partition:0 | Offset:4 | <uetr> | <record>`. To see which topics hold
+anything at all:
+
+```powershell
+docker exec hub-kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 |
+  Where-Object { $_ -match '^hub\.' -and $_ -notmatch ':0$' } | Sort-Object
+```
+
+**4. Count its events in Elasticsearch.** Around 65 for one clean pacs.008 at
+the `full` tracking level.
+
+```powershell
+Start-Sleep -Seconds 12    # the index refreshes every 10s; see the notes below
+
+$body = "{`"query`":{`"term`":{`"payment.uetr`":`"$uetr`"}}}"
+(Invoke-RestMethod -Method Post -ContentType "application/json" `
+   -Uri "http://localhost:9200/logs-payments-*/_count" -Body $body).count
+```
+
+**5. Read the whole journey, in order.**
+
+```powershell
+$body = "{`"query`":{`"term`":{`"payment.uetr`":`"$uetr`"}},`"sort`":[{`"@timestamp`":`"asc`"}],`"size`":200}"
+(Invoke-RestMethod -Method Post -ContentType "application/json" `
+   -Uri "http://localhost:9200/logs-payments-*/_search" -Body $body).hits.hits._source |
+  Select-Object @{n='service';e={$_.service.name}}, @{n='action';e={$_.event.action}}, message |
+  Format-Table -AutoSize
+```
+
+**6. The same thing in Kibana.** <http://localhost:5601> → Discover → the
+`logs-payments-*` data view → search `payment.uetr : "<uetr>"`, sorted oldest
+first, with `service.name`, `event.action` and `message` as columns.
+
+Create the data view once, if the script has not already:
+
+```powershell
+$h = @{ "kbn-xsrf" = "true"; "Content-Type" = "application/json" }
+$body = '{"data_view":{"title":"logs-payments-*","name":"Payment tracking","timeFieldName":"@timestamp"}}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:5601/api/data_views/data_view" -Headers $h -Body $body
+```
+
+**7. And in PostgreSQL**, the system of record:
+
+```powershell
+docker exec -e PGPASSWORD=hub hub-postgres psql -U hub -d payments -c `
+  "SELECT state, service, reason FROM payment_audit WHERE uetr = '$uetr' ORDER BY emitted_ns;"
+```
+
+#### Three things that will otherwise catch you out
+
+- **Elasticsearch is not instant.** The index template sets
+  `refresh_interval: 10s`, so a payment that already shows COMPLETED on the
+  status API is not searchable for a few seconds more — a query run too early
+  returns 0, not an error. The status API and Kafka are immediate.
+- **Kafka values are Protobuf**, so `kafka-console-consumer.sh` prints them as
+  binary with the identifiers and any XML legible inside. The record *key* is
+  the UETR in plain text, which is what makes `Select-String` work.
+- **Use PowerShell, not Git Bash, for `docker exec`.** Git Bash rewrites
+  `/opt/kafka/...` into a Windows path, and the exec fails with a misleading
+  "no such file or directory".
+
+**The local ELK stack is throwaway.** There are no named volumes anywhere in the
+Compose file, so `docker compose down` removes the containers and all the logs
+with them. `docker compose stop` keeps them for when you want to come back.
+
+### Drive the simulator
+
+```bash
+ess send --type pacs.008 --file samples/pacs008_eur.xml \
+         --app-hdr samples/pacs008_eur.apphdr.xml
+ess send --type MT103 --file samples/mt103_gbp.fin
+ess case list                                   # the scenario catalogue
+ess case run mt103_sanctions_hit                # one scripted case
+ess case run-all                                # what CI runs on a Hub change
+ess profile set fcc --hit-rate 0.02 --decision-delay 5m
+ess profile set fin --outage --for 2m           # fault injection
+ess counters --run-id S02-2026-09-28-01
+```
+
+Every subcommand but `serve` is a thin `EssControl` client, so the same commands
+work against a simulator in Docker, in Kubernetes or on a laptop. Add
+`--ess <host>:<port>` to point somewhere else.
+
+## Payment tracking
+
+A payment carries seven identifiers as OpenTelemetry **Baggage**, set once at the
+edge and travelling on every gRPC call and every Kafka record next to
+`traceparent`:
+
+`payment.uetr`, `payment.format`, `payment.msg_type`, `payment.flow`,
+`payment.biz_msg_id`, `payment.trace`, and `run.id` in test environments.
+
+The header stays under 512 bytes, names and accounts and amounts never go in it,
+and it is stripped on calls to the real FIN, SnF and FCC. `tests/e2e/test_tracking.py`
+holds each of those to account.
+
+How much is logged depends on `HUB_TRACKING_MODE`:
+
+| Mode | Level | Events per clean payment |
+| --- | --- | --- |
+| `functional` | `full` | ~30 — every touchpoint and every state change |
+| `ci` | `full` | ~30 |
+| `performance` | `errors` | 0 |
+
+The level is checked before an event is built, so a performance run costs
+nothing in logging. Add `HUB_TRACKING_SPOT_CHECK=minimal:0.1%` to sanity-check a
+few journeys under load.
+
+## Development
+
+| Task | Command |
+| --- | --- |
+| Regenerate the gRPC stubs | `python scripts/gen_proto.py` |
+| Check the stubs are current | `python scripts/gen_proto.py --check` |
+| Regenerate the samples | `python scripts/make_samples.py` |
+| Print the topic catalogue | `python scripts/create_topics.py --list` |
+| Follow one payment through the stack | `.\scripts\trace-payment.ps1` |
+| Send a batch | `docker compose exec ess python -m ess.cli batch --count 50 --rate 10` |
+| Run the whole Hub in one process | `python -m hub all` |
+| Run one Hub service | `python -m hub <service>` |
+| Run the simulator | `python -m ess.cli serve --mode functional` |
+
+Never hand-edit anything under `gen/` or `samples/` — both are generated, and
+`gen/` is not committed. Samples are synthetic by construction: test BICs,
+invented company names, and IBANs built to pass the `schwifty` checksum.
+
+## What is not built yet
+
+The build order in `CLAUDE.md` runs to five steps. Steps 1 to 4 are done:
+foundations, the canonical model, the vertical slice, and the remaining flows
+with CI contract tests. Step 5, the performance framework (`perfctl`, `paygen`,
+the analyser and the SLO gate from `docs/performance-testing.md`), is not
+started — the ESS has its performance mode, which is the prerequisite.
+
+Several things are placeholders because the documents list them as open
+questions, and each is marked with a `TODO(business-rules)` comment next to the
+code that will change:
+
+- **Routing rules** — correspondent selection and cut-off windows. The flows and
+  a small currency cut-off table are implemented; the bank's real rules are not.
+- **Settlement** — ledger posting records a deterministic reference and value
+  date. There is no ledger interface yet.
+- **MX schema validation** — structural checks always run. Official CBPR+ XSDs
+  are licensed through Swift MyStandards and are not in this repository; point
+  `HUB_MX_SCHEMA_DIR` at a directory of `<msg_type>.xsd` files to turn XSD
+  validation on.
+- **Completion** — the Hub treats the network ACK as completion. See
+  `COMPLETION_RULE` in `hub/ack_matcher/processor.py`; the other candidates are
+  the outbound handoff and the final pacs.002.
+- **Schema registry** — records are plain Protobuf on Kafka. Whether the
+  registry is Confluent or Apicurio is still open, so nothing depends on either.
+- **Helm charts** — `deploy/helm/` is empty; Compose is the only deployment.

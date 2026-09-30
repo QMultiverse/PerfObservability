@@ -1,0 +1,86 @@
+// Served by the FIN interface, the SnF interface and FCC. The Hub is the
+// caller. In every test environment all three are served by the ESS.
+//
+// Deadlines: Send* 500 ms, Screen 1 s. Retry only UNAVAILABLE and
+// DEADLINE_EXCEEDED, at most 3 times with exponential backoff and jitter.
+syntax = "proto3";
+
+package ext.v1;
+
+import "hub/v1/common.proto";
+
+option java_multiple_files = true;
+option java_package = "com.bank.ext.v1";
+
+// ------------------------------------------------------------------- FIN
+service FinGateway {
+  rpc SendMt(SendMtRequest) returns (SendAccepted);
+}
+
+message SendMtRequest {
+  hub.v1.MsgRef ref = 1;
+  bytes fin_message = 2;
+  string receiver_bic = 3;
+}
+
+// -------------------------------------------------------------------- SnF
+service SnfGateway {
+  rpc SendMx(SendMxRequest) returns (SendAccepted);
+}
+
+message SendMxRequest {
+  hub.v1.MsgRef ref = 1;
+  bytes app_hdr = 2;
+  bytes document = 3;
+  string requestor_dn = 4;
+  string responder_dn = 5;
+  bool request_delivery_notification = 6;
+}
+
+message SendAccepted {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;
+    DUPLICATE = 2;
+    REJECTED = 3;
+  }
+  Status status = 1;
+  string send_ref = 2;  // FIN session/ISN or SnF reference
+  int64 accepted_ns = 3;
+  string reason = 4;
+}
+
+// -------------------------------------------------------------------- FCC
+service FccScreening {
+  rpc Screen(ScreenRequest) returns (ScreenResult);
+}
+
+message ScreenParty {
+  string role = 1;  // DEBTOR | CREDITOR | DEBTOR_AGENT | CREDITOR_AGENT | INTERMEDIARY
+  string name = 2;
+  string bic = 3;
+  string country = 4;
+}
+
+message ScreenRequest {
+  hub.v1.MsgRef ref = 1;
+  repeated ScreenParty parties = 2;
+  string currency = 3;
+  string amount = 4;  // decimal string; never a float
+  string purpose = 5;
+  string remittance_info = 6;
+}
+
+message ScreenResult {
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    NO_HIT = 1;
+    HIT_PENDING = 2;
+    BLOCK = 3;
+  }
+  Outcome outcome = 1;
+  string case_id = 2;  // set when HIT_PENDING
+  repeated string matched_parties = 3;
+  string reason = 4;
+  int64 screened_ns = 5;
+}

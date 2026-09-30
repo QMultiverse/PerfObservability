@@ -1,0 +1,95 @@
+// Served by the Payment Hub gRPC edge. Callers are FIN, SnF and FCC
+// (the External Systems Simulator in every test environment).
+//
+// Metadata on every call: uetr, flow, traceparent, baggage (+ run-id in test).
+// Deadlines: Deliver* 200 ms, notifications 200 ms.
+syntax = "proto3";
+
+package hub.v1;
+
+import "hub/v1/common.proto";
+
+option java_multiple_files = true;
+option java_package = "com.bank.hub.v1";
+
+// ---------------------------------------------------------------- inbound
+service HubInbound {
+  // FIN delivers an MT to the bank. Light checks only, then a durable write
+  // to hub.in.fin.raw with acks=all; the reply follows the write.
+  rpc DeliverFin(FinDelivery) returns (DeliveryReceipt);
+
+  // SnF delivers an MX. Same contract, hub.in.mx.raw.
+  rpc DeliverMx(MxDelivery) returns (DeliveryReceipt);
+}
+
+message FinDelivery {
+  MsgRef ref = 1;
+  bytes fin_message = 2;  // blocks {1:}{2:}{3:{121:uetr}}{4:...}{5:}
+  string sender_bic = 3;
+  int64 network_ts_ns = 4;
+}
+
+message MxDelivery {
+  MsgRef ref = 1;
+  bytes app_hdr = 2;   // head.001
+  bytes document = 3;  // pacs.008 / pacs.009
+  string snf_ref = 4;
+  int64 network_ts_ns = 5;
+}
+
+message DeliveryReceipt {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;
+    DUPLICATE = 2;
+    REJECTED = 3;
+  }
+  Status status = 1;
+  int64 accepted_ns = 2;  // stamped after the Kafka write is acknowledged
+  string reason = 3;      // populated on REJECTED
+}
+
+// ---------------------------------------------------------- network events
+service HubNetworkEvents {
+  // FIN / SnF report the ACK or NAK for an outbound send.
+  rpc NotifyAck(NetworkAck) returns (Received);
+
+  // SnF reports store-and-forward delivery to the counterparty.
+  rpc NotifyDeliveryNotification(DeliveryNotification) returns (Received);
+}
+
+message NetworkAck {
+  MsgRef ref = 1;
+  Network network = 2;
+  bool ack = 3;  // false = NAK
+  string error_code = 4;
+  string send_ref = 5;  // ISN or SnF ref returned by SendMt / SendMx
+  int64 network_ts_ns = 6;
+}
+
+message DeliveryNotification {
+  MsgRef ref = 1;
+  string snf_ref = 2;
+  bool delivered = 3;
+  string reason = 4;
+  int64 network_ts_ns = 5;
+}
+
+// ------------------------------------------------------------- compliance
+service HubCompliance {
+  // FCC analyst decision on a screening hit; arrives minutes after the hit.
+  rpc NotifyFccDecision(FccDecision) returns (Received);
+}
+
+message FccDecision {
+  enum Decision {
+    DECISION_UNSPECIFIED = 0;
+    RELEASE = 1;
+    BLOCK = 2;
+  }
+  MsgRef ref = 1;
+  string case_id = 2;
+  Decision decision = 3;
+  string reason = 4;
+  int64 decided_ns = 5;
+}

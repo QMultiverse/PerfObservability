@@ -1,0 +1,55 @@
+// Shared value types for the Payment Hub boundary.
+//
+// The design doc sketches MsgRef inside hub_edge.proto, but ext.v1 and ess.v1
+// need the same reference shape. Keeping it here, in hub.v1, gives one
+// definition that every owner imports rather than three that can drift.
+syntax = "proto3";
+
+package hub.v1;
+
+option java_multiple_files = true;
+option java_package = "com.bank.hub.v1";
+
+// Format lane. MT and MX stay on separate lanes until hub.pay.canonical and
+// split again at hub.out.*, so the format is always explicit on the wire.
+enum Format {
+  FORMAT_UNSPECIFIED = 0;
+  MT = 1;
+  MX = 2;
+}
+
+// Network that carries a message.
+enum Network {
+  NETWORK_UNSPECIFIED = 0;
+  FIN = 1;
+  SNF = 2;
+}
+
+// Direction of travel relative to the Hub. Part of the idempotency key
+// (UETR, message type, direction).
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  INBOUND = 1;
+  OUTBOUND = 2;
+}
+
+// Correlation reference carried on every call and every Kafka record.
+// Cover pairs share one UETR.
+message MsgRef {
+  string uetr = 1;      // UUID v4
+  string msg_type = 2;  // "MT103", "MT202COV", "pacs.008.001.08"
+  string flow = 3;      // MT_FIN_103, MX_SNF_PACS008, ...
+}
+
+// Generic ack for fire-and-forget notifications.
+message Received {
+  bool received = 1;
+}
+
+// Claim check back to the raw record on hub.in.*.raw, so later topics can
+// carry the canonical model without copying MX XML through every stage.
+message RawRef {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+}

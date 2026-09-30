@@ -1,0 +1,68 @@
+# Ships the Hub's and the ESS's ECS JSON lines from container stdout into the
+# logs-payments-* data stream. No Logstash: design doc section 9 keeps it
+# optional, and locally it would cost about a gigabyte of memory for nothing.
+#
+# Note the shape: `filebeat.autodiscover` takes a `providers:` list. A list
+# placed directly under `autodiscover` is silently ignored — the manager starts
+# with no providers and ships nothing, with no error in the log.
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      # Explicit templates rather than label hints, so what gets collected is
+      # decided here and does not depend on labels being right on every service.
+      hints.enabled: false
+      templates:
+        # Only our own containers. Elasticsearch, Kibana and Kafka logs are
+        # noise here and would swamp the payment events.
+        - condition:
+            contains:
+              docker.container.image: payment-hub
+          config:
+            - type: container
+              paths: ["/var/lib/docker/containers/${data.docker.container.id}/*.log"]
+              # The services already emit ECS JSON, so the fields are promoted
+              # rather than reparsed downstream.
+              json.keys_under_root: true
+              json.overwrite_keys: true
+              json.add_error_key: true
+              json.expand_keys: true
+
+processors:
+  # Drop everything below INFO: design doc section 9.1, "don't ship DEBUG logs".
+  - drop_event:
+      when:
+        equals:
+          log.level: debug
+  - add_docker_metadata: ~
+  # The container's own name is more useful than its id when reading a journey.
+  - rename:
+      fields:
+        - from: container.name
+          to: service.node.name
+      ignore_missing: true
+      fail_on_error: false
+  - drop_fields:
+      fields: ["agent.ephemeral_id", "ecs.version", "input.type", "log.offset", "stream"]
+      ignore_missing: true
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "logs-payments-default"
+  # Batch aggressively: logging must never be the bottleneck.
+  bulk_max_size: 800
+  worker: 1
+
+setup.ilm.enabled: false      # the policy is installed by es-init
+setup.template.enabled: false # so is the index template
+
+# Filebeat's own logs. info shows harvesters starting, which is what tells you
+# collection is actually working; metrics are off so it stays quiet after that.
+logging.level: info
+logging.metrics.enabled: false
+
+# Bounded queue: under a log storm, drop rather than back up onto the Hub.
+queue.mem:
+  events: 8192
+  flush.min_events: 512
+  flush.timeout: 1s

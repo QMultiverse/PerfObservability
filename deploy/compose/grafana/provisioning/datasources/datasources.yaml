@@ -1,0 +1,29 @@
+# Provisioned datasources. Nothing is clicked in the UI: performance-testing.md
+# section 10 keeps dashboards and datasources as code in git.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 5s
+      httpMethod: POST
+
+  # Logs stay in Elasticsearch rather than moving to Loki: the ECS mappings and
+  # the ILM policy already work, and Grafana reads Elasticsearch natively. It
+  # also keeps the AGPL surface down to Grafana itself.
+  - name: Elasticsearch
+    type: elasticsearch
+    uid: elasticsearch
+    access: proxy
+    url: http://elasticsearch:9200
+    jsonData:
+      index: "logs-payments-*"
+      timeField: "@timestamp"
+      esVersion: "8.0.0"
+      logMessageField: message
+      logLevelField: log.level

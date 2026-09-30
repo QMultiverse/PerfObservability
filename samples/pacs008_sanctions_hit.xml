@@ -1,0 +1,87 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pacs.008.001.08">
+  <FIToFICstmrCdtTrf>
+    <GrpHdr>
+      <MsgId>BIZ7242132169</MsgId>
+      <CreDtTm>2026-09-28T10:15:02Z</CreDtTm>
+      <NbOfTxs>1</NbOfTxs>
+      <TtlIntrBkSttlmAmt Ccy="EUR">500000.00</TtlIntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-09-28</IntrBkSttlmDt>
+      <SttlmInf>
+        <SttlmMtd>INDA</SttlmMtd>
+      </SttlmInf>
+    </GrpHdr>
+    <CdtTrfTxInf>
+      <PmtId>
+        <InstrId>INS2438388389</InstrId>
+        <EndToEndId>E2E9701284520</EndToEndId>
+        <UETR>8a0cb201-725c-4338-b690-be1eb8d90a1b</UETR>
+      </PmtId>
+      <PmtTpInf>
+        <SvcLvl>
+          <Cd>G001</Cd>
+        </SvcLvl>
+      </PmtTpInf>
+      <IntrBkSttlmAmt Ccy="EUR">500000.00</IntrBkSttlmAmt>
+      <IntrBkSttlmDt>2026-09-28</IntrBkSttlmDt>
+      <InstdAmt Ccy="EUR">500000.00</InstdAmt>
+      <ChrgBr>SHAR</ChrgBr>
+      <InstgAgt>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+        </FinInstnId>
+      </InstgAgt>
+      <InstdAgt>
+        <FinInstnId>
+          <BICFI>TESTCHZZXXX</BICFI>
+          <Nm>TEST BANK ZURICH</Nm>
+        </FinInstnId>
+      </InstdAgt>
+      <Dbtr>
+        <Nm>REDLIST HOLDINGS SA</Nm>
+        <PstlAdr>
+          <TwnNm>PARIS</TwnNm>
+          <Ctry>FR</Ctry>
+          <AdrLine>8 RUE DU COMMERCE</AdrLine>
+        </PstlAdr>
+      </Dbtr>
+      <DbtrAcct>
+        <Id>
+          <IBAN>FR7620041000008781459803861</IBAN>
+        </Id>
+      </DbtrAcct>
+      <DbtrAgt>
+        <FinInstnId>
+          <BICFI>TESTUS33XXX</BICFI>
+          <Nm>TEST BANK NEW YORK</Nm>
+        </FinInstnId>
+      </DbtrAgt>
+      <CdtrAgt>
+        <FinInstnId>
+          <BICFI>TESTCHZZXXX</BICFI>
+          <Nm>TEST BANK ZURICH</Nm>
+        </FinInstnId>
+      </CdtrAgt>
+      <Cdtr>
+        <Nm>ACME MANUFACTURING GMBH</Nm>
+        <PstlAdr>
+          <TwnNm>FRANKFURT</TwnNm>
+          <Ctry>DE</Ctry>
+          <AdrLine>45 INDUSTRIESTRASSE</AdrLine>
+        </PstlAdr>
+      </Cdtr>
+      <CdtrAcct>
+        <Id>
+          <IBAN>DE44370400448053880265</IBAN>
+        </Id>
+      </CdtrAcct>
+      <Purp>
+        <Cd>GDDS</Cd>
+      </Purp>
+      <RmtInf>
+        <Ustrd>INVOICE 72330</Ustrd>
+      </RmtInf>
+    </CdtTrfTxInf>
+  </FIToFICstmrCdtTrf>
+</Document>

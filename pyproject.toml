@@ -1,0 +1,119 @@
+[project]
+name = "payment-hub"
+version = "0.1.0"
+description = "Payment Hub — SWIFT MT/MX cross-border payment processing, plus the External Systems Simulator"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+dependencies = [
+  # gRPC + protobuf
+  "grpcio>=1.68",
+  "protobuf>=5.28",
+  # Kafka
+  "confluent-kafka>=2.6",
+  # Observability
+  "opentelemetry-api>=1.28",
+  "opentelemetry-sdk>=1.28",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.28",
+  "prometheus-client>=0.21",
+  # MX handling
+  "lxml>=5.3",
+  "xmlschema>=3.4",
+  # Data / validation
+  "schwifty>=2024.9",
+  # Persistence
+  "psycopg[binary]>=3.2",
+  # CLIs
+  "typer>=0.15",
+]
+
+[project.optional-dependencies]
+dev = [
+  "grpcio-tools>=1.68",
+  "mypy>=1.13",
+  "mypy-protobuf>=3.6",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6.0",
+  "ruff>=0.8",
+  "types-protobuf>=5.28",
+]
+
+[project.scripts]
+ess = "ess.cli:app"
+hub-service = "hub.common.main:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+  "hub", "hub.common", "hub.edge", "hub.fin_parser", "hub.mx_parser",
+  "hub.screening", "hub.routing", "hub.settlement", "hub.dispatcher",
+  "hub.ack_matcher", "hub.status_api", "hub.db_sink",
+  "ess",
+  "hub_telemetry", "hub_model", "hub_format",
+  "hub_proto", "hub_proto.hub", "hub_proto.hub.v1",
+  "hub_proto.ext", "hub_proto.ext.v1", "hub_proto.ess", "hub_proto.ess.v1",
+]
+
+[tool.setuptools.package-dir]
+hub_telemetry = "libs/hub_telemetry/hub_telemetry"
+hub_model = "libs/hub_model/hub_model"
+hub_format = "libs/hub_format/hub_format"
+hub_proto = "gen/hub_proto"
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["gen", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "ASYNC", "PTH", "T20"]
+ignore = [
+  "B008",    # Typer uses function calls in argument defaults
+  "RUF012",  # mutable class attrs; noisy with dataclass-free config objects
+]
+
+[tool.ruff.lint.per-file-ignores]
+# These re-export generated protobuf symbols; the names are not ours to choose.
+"libs/hub_model/hub_model/proto.py" = ["N816"]
+# TransactionAborted and InvalidIdentifier read better without an -Error suffix.
+"libs/hub_telemetry/hub_telemetry/messaging.py" = ["N818"]
+"libs/hub_model/hub_model/ids.py" = ["N818"]
+"tests/*" = ["T20"]
+"scripts/*" = ["T20"]
+"ess/cli.py" = ["T20"]
+"hub/status_api/*" = ["T20"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = false
+mypy_path = ["libs/hub_telemetry", "libs/hub_model", "libs/hub_format", "gen"]
+exclude = ['^gen/', '^\.venv/']
+disallow_untyped_decorators = false
+# grpcio's generated *_pb2_grpc modules ship no stubs, so every servicer base
+# class is Any, and types-grpcio makes ServicerContext generic in a way the
+# generated code does not parameterise. Neither is ours to fix.
+disallow_subclassing_any = false
+disallow_any_generics = false
+
+[[tool.mypy.overrides]]
+module = ["confluent_kafka.*", "hub_proto.*", "schwifty.*", "xmlschema.*", "lxml.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+  "kafka: requires a real Kafka broker (deselect with '-m \"not kafka\"')",
+  "docker: requires the local Compose stack",
+]

@@ -1,0 +1,190 @@
+// Served by the External Systems Simulator. Drives the behaviour of the FIN,
+// SnF and FCC emulators at runtime, runs named test cases and reads counters.
+//
+// The ESS is part of the Payment Hub deliverable and is versioned with the
+// rest of the contract, so the Hub and the ESS cannot drift apart.
+syntax = "proto3";
+
+package ess.v1;
+
+import "hub/v1/common.proto";
+
+option java_multiple_files = true;
+option java_package = "com.bank.ess.v1";
+
+service EssControl {
+  rpc SetProfile(BehaviourProfile) returns (Applied);   // change behaviour at runtime
+  rpc RunCase(CaseRequest) returns (CaseResult);        // e.g. "mt103_sanctions_hit"
+  rpc GetCounters(CounterRequest) returns (Counters);   // per-flow counts
+  rpc Reset(ResetRequest) returns (Applied);            // clear state between tests
+  rpc SendInbound(SendInboundRequest) returns (SendInboundResult);  // ess send
+  rpc ListCases(ListCasesRequest) returns (ListCasesResult);
+  rpc RunBatch(BatchRequest) returns (BatchResult);  // ess batch
+}
+
+enum Target {
+  TARGET_UNSPECIFIED = 0;
+  FIN = 1;
+  SNF = 2;
+  FCC = 3;
+  ALL = 4;
+}
+
+// Latency model for a reply. "fixed" uses p50_ms; "lognormal" and "uniform"
+// draw between p50_ms and p99_ms.
+message LatencyDist {
+  string kind = 1;  // fixed | uniform | lognormal
+  double p50_ms = 2;
+  double p99_ms = 3;
+}
+
+message BehaviourProfile {
+  Target target = 1;
+  LatencyDist accept_latency = 2;  // sync reply time
+  LatencyDist ack_latency = 3;     // async ACK / NAK or FCC decision delay
+  double nak_rate = 4;
+  double hit_rate = 5;
+  double block_rate = 6;
+  bool outage = 7;            // return UNAVAILABLE
+  int64 outage_for_ms = 8;    // 0 = until cleared
+  double duplicate_rate = 9;  // repeat callbacks, to exercise de-duplication
+  double release_rate = 10;   // share of hits released rather than blocked
+  bool delivery_notifications = 11;  // SnF only
+}
+
+message Applied {
+  bool applied = 1;
+  string detail = 2;
+}
+
+message CaseRequest {
+  string case_id = 1;        // e.g. mt103_sanctions_hit
+  string run_id = 2;         // test-run isolation
+  string trace_level = 3;    // per-run override: full | standard | minimal | errors | none
+  int32 repeat = 4;          // default 1
+  int64 timeout_ms = 5;      // how long to wait for the expected outcome
+}
+
+message CaseResult {
+  bool passed = 1;
+  string case_id = 2;
+  repeated string uetrs = 3;
+  string detail = 4;
+  repeated CaseStep steps = 5;
+  int64 duration_ms = 6;
+}
+
+message CaseStep {
+  string name = 1;
+  bool passed = 2;
+  string detail = 3;
+  int64 at_ns = 4;
+}
+
+message ListCasesRequest {}
+
+message ListCasesResult {
+  repeated CaseInfo cases = 1;
+}
+
+message CaseInfo {
+  string case_id = 1;
+  string flow = 2;
+  string description = 3;
+  string expected_state = 4;
+}
+
+message SendInboundRequest {
+  string msg_type = 1;   // MT103 | MT202 | MT202COV | pacs.008 | pacs.009 | pacs.009COV
+  bytes payload = 2;     // MT text, or the MX Document; empty means "use the sample"
+  bytes app_hdr = 3;     // MX only; empty means "generate one"
+  string uetr = 4;       // empty means "generate one"
+  string flow = 5;
+  string run_id = 6;
+  string trace_level = 7;
+  int32 count = 8;       // default 1
+}
+
+message SendInboundResult {
+  repeated string uetrs = 1;
+  int32 accepted = 2;
+  int32 rejected = 3;
+  string detail = 4;
+  // A retried Deliver* whose first attempt already landed comes back DUPLICATE.
+  // That is the idempotency rule working, not a failure — but it has to be
+  // reported, or an accepted payment looks like nothing happened.
+  int32 duplicate = 5;
+}
+
+// A batch of payments at a controlled rate, driven from inside the ESS so the
+// pacing is accurate. This is the inbound sender, not a load generator: high-rate
+// load is paygen's job (see docs/performance-testing.md). Local runs should stay
+// at or below ~50 TPS.
+message BatchRequest {
+  int32 count = 1;            // how many payments
+  double rate_per_second = 2; // 0 = as fast as the Hub accepts them
+  int32 concurrency = 3;      // in-flight deliveries; default 8
+  repeated MixEntry mix = 4;  // message types and their share; default all pacs.008
+  string run_id = 5;
+  string trace_level = 6;
+  int64 settle_timeout_ms = 7; // how long to wait for terminal states; 0 = do not wait
+  double sanctions_hit_rate = 8;
+}
+
+message MixEntry {
+  string msg_type = 1;
+  double share = 2;  // relative weight, not a percentage
+  string flow = 3;
+}
+
+message BatchResult {
+  int32 requested = 1;
+  int32 accepted = 2;
+  int32 rejected = 3;
+  int32 duplicate = 4;
+  int32 errors = 5;
+  int64 send_duration_ms = 6;
+  double achieved_rate_per_second = 7;
+
+  // Populated when settle_timeout_ms > 0 and a status API is configured.
+  int32 settled = 10;
+  int32 unsettled = 11;
+  map<string, int32> by_state = 12;   // COMPLETED, REJECTED, BLOCKED, ...
+  double p50_end_to_end_ms = 13;
+  double p95_end_to_end_ms = 14;
+  double max_end_to_end_ms = 15;
+  int64 total_duration_ms = 16;
+  repeated string failed_uetrs = 17;  // capped; for chasing one up in Kibana
+  string detail = 18;
+}
+
+message CounterRequest {
+  string run_id = 1;  // empty means all
+}
+
+message Counters {
+  map<string, int64> by_method = 1;  // e.g. "FinGateway.SendMt" -> 120
+  map<string, int64> by_flow = 2;    // e.g. "MX_SNF_PACS008" -> 120
+  map<string, int64> by_outcome = 3; // ACK, NAK, NO_HIT, HIT_PENDING, BLOCK, ...
+  int64 calls_served = 4;
+  int64 calls_made = 5;
+  int64 errors = 6;
+}
+
+message ResetRequest {
+  bool clear_counters = 1;
+  bool clear_profiles = 2;
+  bool clear_recorder = 3;
+}
+
+// The recorder writes one of these per call made or received.
+message CallRecord {
+  hub.v1.MsgRef ref = 1;
+  string method = 2;
+  string direction = 3;  // SERVED | MADE
+  string outcome = 4;
+  int64 started_ns = 5;
+  int64 duration_ns = 6;
+  string run_id = 7;
+  string error = 8;
+}

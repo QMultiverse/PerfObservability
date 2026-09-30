@@ -1,0 +1,144 @@
+{
+  "uid": "hub-pipeline",
+  "title": "2 · Pipeline stage breakdown",
+  "tags": ["payment-hub", "perf"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "description": "Where the time goes, and where work is accumulating. Lag and in-flight move before latency does, so this is the dashboard that shows a problem first.",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Back-pressure — the leading indicators",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer lag (messages) per group and topic",
+      "description": "SLO is lag in SECONDS < 5, which needs kafka-exporter. Messages is what the Hub can report itself: 10,000 messages is nothing at 1,500 TPS and catastrophic at 10.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" } }
+      },
+      "options": { "legend": { "displayMode": "table", "calcs": ["max"], "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "hub:consumer_lag_messages > 0",
+          "legendFormat": "{{group}} · {{topic}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Payments in flight (accepted, not yet terminal)",
+      "description": "Little's law. Flat means the Hub is keeping up; rising means it is not, whatever the latency percentiles say. Not produced-minus-consumed per topic: hub.pay.status and hub.pay.state each have two consumer groups, so that subtraction goes negative.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" } }
+      },
+      "options": { "legend": { "displayMode": "table", "calcs": ["lastNotNull", "max"], "placement": "bottom" } },
+      "targets": [
+        { "refId": "A", "expr": "hub:payments_inflight", "legendFormat": "in flight" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Per-stage latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Stage latency p99, by stage and format",
+      "description": "The parse stage is the main format-specific cost (T2 − T1). If dispatch or settle differ between MT and MX, investigate — they share the same code.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 11 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" } }
+      },
+      "options": { "legend": { "displayMode": "table", "calcs": ["mean", "max"], "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, stage, format) (rate(hub_stage_latency_seconds_bucket[1m])))",
+          "legendFormat": "{{stage}} · {{format}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Parse cost: MT vs MX",
+      "description": "T2 − T1. The single figure that justifies separate parser deployments.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 11 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 10 } } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, format) (rate(hub_stage_latency_seconds_bucket{stage=\"parse\"}[1m])))",
+          "legendFormat": "p99 · {{format}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.50, sum by (le, format) (rate(hub_stage_latency_seconds_bucket{stage=\"parse\"}[1m])))",
+          "legendFormat": "p50 · {{format}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Kafka transactions — expected to be the dominant tuning knob",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Transaction commit time per stage",
+      "description": "Each stage commits one Kafka transaction per batch (~2 round trips). Batch size is the knob; this panel is how you tune it.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 0 } } },
+      "options": { "legend": { "displayMode": "table", "calcs": ["mean", "max"], "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, service) (rate(hub_kafka_transaction_seconds_bucket[1m])))",
+          "legendFormat": "p99 · {{service}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Record rate per topic — sizing only, NOT TPS",
+      "description": "One transaction is ~20 Kafka records, and the multiplier varies with cover pairs, HELD payments and retries. Use this for broker sizing; read TPS off dashboard 1.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 15, "stacking": { "mode": "normal" } } } },
+      "options": { "legend": { "displayMode": "table", "calcs": ["mean"], "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (topic) (rate(hub_kafka_produced_total[1m]))",
+          "legendFormat": "{{topic}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Aborted transactions",
+      "description": "Should be flat at zero. Anything here means exactly-once is under strain.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 29 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 20 } } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, reason) (rate(hub_kafka_transactions_aborted_total[1m]))",
+          "legendFormat": "{{service}} · {{reason}}"
+        }
+      ]
+    }
+  ]
+}
