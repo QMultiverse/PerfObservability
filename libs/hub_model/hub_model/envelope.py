@@ -48,7 +48,10 @@ STATE_ORDER: dict[int, int] = {
     # Terminal failures sort above everything; nothing follows them.
     pb.BLOCKED: 10,
     pb.REJECTED: 10,
-    pb.FAILED: 10,
+    # FAILED is not terminal: it means "on the retry ladder" and can follow
+    # any stage, so its rank says nothing about progress. supersedes() orders
+    # it by time instead.
+    pb.FAILED: 0,
 }
 
 TERMINAL_STATES = frozenset({pb.COMPLETED, pb.REJECTED, pb.BLOCKED})
@@ -112,6 +115,29 @@ def is_forward(current: int, proposed: int) -> bool:
     if current in TERMINAL_STATES:
         return False
     return STATE_ORDER.get(proposed, 0) > STATE_ORDER.get(current, 0)
+
+
+def supersedes(current: int, current_ns: int, proposed: int, proposed_ns: int) -> bool:
+    """Whether a status event should replace the state a sink reports.
+
+    The rule both sinks apply (the status API here, the DB sink in SQL):
+
+    * a terminal state is final;
+    * FAILED is transient, so moving into or out of it is decided by time:
+      the newer event wins. A payment that failed, was retried and then
+      dispatched must not stay FAILED, and a stale FAILED must not overwrite
+      what happened after it;
+    * otherwise the state only moves forward by rank, which keeps a network
+      ACK that beats the dispatcher's commit (COMPLETED before DISPATCHED)
+      from being overwritten.
+    """
+    if current == pb.PAYMENT_STATE_UNSPECIFIED:
+        return True
+    if current in TERMINAL_STATES:
+        return False
+    if pb.FAILED in (current, proposed):
+        return proposed_ns >= current_ns
+    return state_rank(proposed) >= state_rank(current)
 
 
 def state_rank(state: int) -> int:
@@ -226,4 +252,5 @@ __all__ = [
     "state_label",
     "state_record",
     "status_event",
+    "supersedes",
 ]

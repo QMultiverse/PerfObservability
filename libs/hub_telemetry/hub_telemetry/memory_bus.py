@@ -21,6 +21,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from . import metrics
 from .messaging import Bus, BusConsumer, Record, TopicSpec, TransactionAborted
 
 
@@ -166,6 +167,7 @@ class MemoryBus(Bus):
                 by_topic[topic].append(member)
         for member in members:
             member._assigned = []
+        metrics.kafka_rebalances.labels(group_id, "assign").inc()
         for topic, subscribers in by_topic.items():
             partitions = self._topic(topic).spec.partitions
             for part in range(partitions):

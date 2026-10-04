@@ -178,6 +178,8 @@ class InboundSender:
             metadata.append(("run-id", self.run_id))
 
         started = now_ns()
+        fmt = pb.format_name(delivery.format)
+        self.recorder.m1_sending(delivery.uetr, started, fmt=fmt, flow=delivery.flow)
         stub = pb.HubInboundStub(self._open())
         try:
             if delivery.format == pb.MX:
@@ -204,6 +206,9 @@ class InboundSender:
                 )
                 method = "HubInbound.DeliverFin"
         except grpc.aio.AioRpcError as exc:
+            self.recorder.m1_done(
+                delivery.uetr, started, fmt=fmt, flow=delivery.flow, accepted=False
+            )
             self.recorder.record(
                 method="HubInbound.Deliver",
                 direction="MADE",
@@ -217,6 +222,13 @@ class InboundSender:
             )
             raise
 
+        self.recorder.m1_done(
+            delivery.uetr,
+            started,
+            fmt=fmt,
+            flow=delivery.flow,
+            accepted=receipt.status == DeliveryReceipt.ACCEPTED,
+        )
         self.recorder.record(
             method=method,
             direction="MADE",
@@ -224,7 +236,7 @@ class InboundSender:
             started_ns=started,
             uetr=delivery.uetr,
             flow=delivery.flow,
-            fmt=pb.format_name(delivery.format),
+            fmt=fmt,
             msg_type=delivery.msg_type,
             run_id=self.run_id,
         )

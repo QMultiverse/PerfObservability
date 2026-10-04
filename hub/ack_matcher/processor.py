@@ -41,6 +41,14 @@ SERVICE_NAME: Final = "hub-ack-matcher"
 #: What the Hub treats as a completed payment. See the module docstring.
 COMPLETION_RULE: Final = "NETWORK_ACK"
 
+#: A DISPATCHED payment with no ACK after this long is reported as overdue on
+#: ``hub_awaiting_ack{overdue="true"}``. Detection only: a lost ACK used to
+#: leave a payment DISPATCHED forever with nothing noticing (perf scenarios 1,
+#: 3 and 4).
+# TODO(business-rules): what the Hub does about an overdue ACK — re-send,
+# query the network, or raise it to operations — is not decided.
+ACK_OVERDUE_S: Final = 60.0
+
 
 class AckMatcher(Processor):
     """Network ACK / NAK in; COMPLETED or REJECTED out."""
@@ -52,6 +60,19 @@ class AckMatcher(Processor):
     # The ACK arrives on its own topic with nothing but a UETR. The payment it
     # belongs to comes from the compacted state topic.
     reads_state = True
+
+    def __init__(self, settings: ServiceSettings, events: Events) -> None:
+        super().__init__(settings, events)
+        # Counted at scrape time from the state store, so the figure stays
+        # current even when no ACKs arrive — which is exactly when it matters.
+        metrics.awaiting_ack.labels(SERVICE_NAME, "false").set_function(
+            lambda: self.store.count_in_state(pb.DISPATCHED)
+        )
+        metrics.awaiting_ack.labels(SERVICE_NAME, "true").set_function(
+            lambda: self.store.count_in_state(
+                pb.DISPATCHED, updated_before_ns=now_ns() - int(ACK_OVERDUE_S * 1e9)
+            )
+        )
 
     async def handle(self, record: Record, out: Outbox) -> None:
         ack = NetworkAckRecord()

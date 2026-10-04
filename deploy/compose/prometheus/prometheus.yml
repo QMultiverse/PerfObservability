@@ -1,4 +1,4 @@
-# Scrapes the Hub, the ESS and (later) the exporters.
+# Scrapes the Hub, the ESS, the Kafka broker (JMX) and kafka-exporter.
 #
 # Static targets, on purpose: a local stack has a known set of hostnames, and
 # handing Prometheus the Docker socket for service discovery is a privilege it
@@ -61,6 +61,19 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["ess:9464"]
+
+  # ------------------------------ Kafka broker: JMX exporter agent (JVM too)
+  - job_name: kafka
+    metrics_path: /metrics
+    # The per-partition log-size beans make this the slowest target.
+    scrape_timeout: 4s
+    static_configs:
+      - targets: ["kafka:9404"]
+
+  # ------------------------ Kafka consumer-group lag, from the broker's side
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
 
   - job_name: prometheus
     static_configs:

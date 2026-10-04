@@ -20,6 +20,7 @@ import contextlib
 import logging
 import random
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -37,7 +38,9 @@ from hub_model.proto import (
     SendMxRequest,
 )
 from hub_telemetry.events import Events
-from hub_telemetry.grpc_telemetry import DEADLINE_NOTIFY_S, channel
+from hub_telemetry.grpc_telemetry import DEADLINE_NOTIFY_S, RETRYABLE, channel
+from hub_telemetry.metrics import REGISTRY
+from prometheus_client import Counter as PromCounter
 
 from .profiles import Profile, ProfileStore
 from .recorder import Recorder
@@ -45,6 +48,39 @@ from .recorder import Recorder
 log = logging.getLogger(__name__)
 
 SERVICE_NAME: Final = "ess"
+
+# Network notifications (ACK, delivery notification, FCC decision) are
+# redelivered until the Hub takes them, as a real FIN / SnF interface keeps an
+# undelivered ACK queued. Giving up after one call left payments DISPATCHED
+# forever (found by perf scenarios 1, 3 and 4). The Hub de-duplicates repeats.
+#
+# Redelivery is bounded, because unbounded retries turn a slow Hub into an
+# overloaded one (the retry storm found by perf scenario 2): one call per round
+# (the channel does not retry on top), backoff from 2 s to 60 s with jitter, and
+# at most REDELIVERY_RATE_PER_S redeliveries a second per emulator, however
+# many notifications are waiting.
+REDELIVERY_HORIZON_S: Final = 600.0
+REDELIVERY_FIRST_S: Final = 2.0
+REDELIVERY_MAX_S: Final = 60.0
+REDELIVERY_RATE_PER_S: Final = 5.0
+#: What a redelivery retries. Wider than the Hub's own RETRYABLE: under
+#: overload the Hub's side can answer CANCELLED, and abandoning on it left 276
+#: payments DISPATCHED (perf scenario 2). A repeat is harmless, the Hub
+#: de-duplicates notifications.
+REDELIVERABLE: Final = RETRYABLE | {grpc.StatusCode.CANCELLED}
+
+ess_redeliveries = PromCounter(
+    "ess_notify_redeliveries_total",
+    "Notifications to the Hub sent again after a failed attempt",
+    ["method", "error"],
+    registry=REGISTRY,
+)
+ess_notify_abandoned = PromCounter(
+    "ess_notify_abandoned_total",
+    "Notifications the ESS gave up on: not retryable, or past the redelivery horizon",
+    ["method", "error"],
+    registry=REGISTRY,
+)
 
 # Party names the FCC emulator treats as a deterministic hit. Invented; see
 # hub_format.samples.SANCTIONS_NAMES.
@@ -83,6 +119,38 @@ class Overrides:
         self._by_uetr.clear()
 
 
+class RateBudget:
+    """A token bucket: at most ``rate`` takes a second, bursting to ``burst``."""
+
+    def __init__(
+        self,
+        rate: float,
+        burst: float = 1.0,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.rate = rate
+        self.burst = burst
+        self._clock = clock
+        self._tokens = burst
+        self._last = clock()
+        self._lock = asyncio.Lock()
+
+    def _refill(self) -> None:
+        now = self._clock()
+        self._tokens = min(self.burst, self._tokens + (now - self._last) * self.rate)
+        self._last = now
+
+    async def take(self, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+        """Wait for a token. Callers queue in order behind the lock."""
+        async with self._lock:
+            self._refill()
+            if self._tokens < 1.0:
+                await sleep((1.0 - self._tokens) / self.rate)
+                self._refill()
+            self._tokens -= 1.0
+
+
 class EmulatorBase:
     """Shared plumbing: profiles, latency, callbacks and recording."""
 
@@ -106,6 +174,7 @@ class EmulatorBase:
         self.rng = rng or random.Random()
         self._channel: grpc.aio.Channel | None = None
         self._tasks: set[asyncio.Task[None]] = set()
+        self.redelivery_budget = RateBudget(REDELIVERY_RATE_PER_S)
 
     @property
     def profile(self) -> Profile:
@@ -113,7 +182,8 @@ class EmulatorBase:
 
     def hub_channel(self) -> grpc.aio.Channel:
         if self._channel is None:
-            self._channel = channel(self.hub_target, self.events)
+            # One attempt per call: notify_reliably is the retry policy.
+            self._channel = channel(self.hub_target, self.events, max_attempts=1)
         return self._channel
 
     async def close(self) -> None:
@@ -128,6 +198,70 @@ class EmulatorBase:
 
     async def pause_accept(self) -> None:
         await asyncio.sleep(self.profile.accept_latency.sample(self.rng))
+
+    async def notify_reliably(
+        self,
+        call: Callable[[], Awaitable[object]],
+        *,
+        method: str,
+        ref: pb.MsgRef,
+        outcome: str,
+        fmt: str = "",
+    ) -> str:
+        """Deliver one notification to the Hub, redelivering until it lands.
+
+        Every attempt is recorded. Returns ``outcome`` once the Hub takes it,
+        or ``ERROR`` if the Hub refused it for good or the horizon ran out.
+        """
+        give_up_at = time.monotonic() + REDELIVERY_HORIZON_S
+        delay = REDELIVERY_FIRST_S
+        first = True
+        while True:
+            if not first:
+                # Redeliveries share a budget; first attempts never wait on it.
+                await self.redelivery_budget.take(self.sleep)
+            first = False
+            started = now_ns()
+            try:
+                await call()
+            except grpc.aio.AioRpcError as exc:
+                error = exc.code().name
+                self.recorder.record(
+                    method=method,
+                    direction="MADE",
+                    outcome="ERROR",
+                    started_ns=started,
+                    uetr=ref.uetr,
+                    flow=ref.flow,
+                    fmt=fmt,
+                    msg_type=ref.msg_type,
+                    error=error,
+                )
+                wait_s = delay * self.rng.uniform(0.5, 1.0)
+                if exc.code() not in REDELIVERABLE or time.monotonic() + wait_s > give_up_at:
+                    ess_notify_abandoned.labels(method, error).inc()
+                    log.error("%s for %s abandoned: %s", method, ref.uetr, error)
+                    return "ERROR"
+                ess_redeliveries.labels(method, error).inc()
+                log.warning("%s for %s failed (%s); redelivering", method, ref.uetr, error)
+                await self.sleep(wait_s)
+                delay = min(delay * 2, REDELIVERY_MAX_S)
+                continue
+            self.recorder.record(
+                method=method,
+                direction="MADE",
+                outcome=outcome,
+                started_ns=started,
+                uetr=ref.uetr,
+                flow=ref.flow,
+                fmt=fmt,
+                msg_type=ref.msg_type,
+            )
+            return outcome
+
+    async def sleep(self, seconds: float) -> None:
+        """Backoff between redeliveries; tests replace it to skip the wait."""
+        await asyncio.sleep(seconds)
 
     def schedule(self, coro: object) -> None:
         """Run a callback in the background, keeping a reference to the task."""
@@ -165,6 +299,7 @@ class FinEmulator(EmulatorBase, pb.FinGatewayServicer):
         started = now_ns()
         await self.guard_outage(context, "FinGateway.SendMt")
         await self.pause_accept()
+        self.recorder.m2_received(request.ref.uetr, fmt="MT")
 
         override = self.overrides.get(request.ref.uetr)
         if override and override.reject_send:
@@ -217,26 +352,14 @@ class FinEmulator(EmulatorBase, pb.FinGatewayServicer):
 
     async def _notify(self, ack: NetworkAck, *, repeat: bool) -> None:
         stub = pb.HubNetworkEventsStub(self.hub_channel())
+        outcome = "ACK" if ack.ack else "NAK"
         for attempt in range(2 if repeat else 1):
-            started = now_ns()
-            try:
-                await stub.NotifyAck(ack, timeout=DEADLINE_NOTIFY_S)
-                outcome = "ACK" if ack.ack else "NAK"
-                error = ""
-            except grpc.aio.AioRpcError as exc:
-                outcome = "ERROR"
-                error = exc.code().name
-                log.warning("NotifyAck failed for %s: %s", ack.ref.uetr, error)
-            self.recorder.record(
+            await self.notify_reliably(
+                lambda: stub.NotifyAck(ack, timeout=DEADLINE_NOTIFY_S),
                 method="HubNetworkEvents.NotifyAck",
-                direction="MADE",
+                ref=ack.ref,
                 outcome=outcome if attempt == 0 else f"{outcome}_DUPLICATE",
-                started_ns=started,
-                uetr=ack.ref.uetr,
-                flow=ack.ref.flow,
                 fmt="MT",
-                msg_type=ack.ref.msg_type,
-                error=error,
             )
 
 
@@ -251,6 +374,7 @@ class SnfEmulator(EmulatorBase, pb.SnfGatewayServicer):
         started = now_ns()
         await self.guard_outage(context, "SnfGateway.SendMx")
         await self.pause_accept()
+        self.recorder.m2_received(request.ref.uetr, fmt="MX")
 
         override = self.overrides.get(request.ref.uetr)
         if override and override.reject_send:
@@ -304,23 +428,12 @@ class SnfEmulator(EmulatorBase, pb.SnfGatewayServicer):
         ack.ref.CopyFrom(ref)
 
         stub = pb.HubNetworkEventsStub(self.hub_channel())
-        started = now_ns()
-        try:
-            await stub.NotifyAck(ack, timeout=DEADLINE_NOTIFY_S)
-            outcome, error = ("ACK" if ack.ack else "NAK"), ""
-        except grpc.aio.AioRpcError as exc:
-            outcome, error = "ERROR", exc.code().name
-            log.warning("NotifyAck failed for %s: %s", ref.uetr, error)
-        self.recorder.record(
+        await self.notify_reliably(
+            lambda: stub.NotifyAck(ack, timeout=DEADLINE_NOTIFY_S),
             method="HubNetworkEvents.NotifyAck",
-            direction="MADE",
-            outcome=outcome,
-            started_ns=started,
-            uetr=ref.uetr,
-            flow=ref.flow,
+            ref=ref,
+            outcome="ACK" if ack.ack else "NAK",
             fmt="MX",
-            msg_type=ref.msg_type,
-            error=error,
         )
 
         if ack.ack and wants_notification and self.profile.delivery_notifications:
@@ -333,22 +446,12 @@ class SnfEmulator(EmulatorBase, pb.SnfGatewayServicer):
         )
         notification.ref.CopyFrom(ref)
         stub = pb.HubNetworkEventsStub(self.hub_channel())
-        started = now_ns()
-        try:
-            await stub.NotifyDeliveryNotification(notification, timeout=DEADLINE_NOTIFY_S)
-            outcome, error = "DELIVERED", ""
-        except grpc.aio.AioRpcError as exc:
-            outcome, error = "ERROR", exc.code().name
-        self.recorder.record(
+        await self.notify_reliably(
+            lambda: stub.NotifyDeliveryNotification(notification, timeout=DEADLINE_NOTIFY_S),
             method="HubNetworkEvents.NotifyDeliveryNotification",
-            direction="MADE",
-            outcome=outcome,
-            started_ns=started,
-            uetr=ref.uetr,
-            flow=ref.flow,
+            ref=ref,
+            outcome="DELIVERED",
             fmt="MX",
-            msg_type=ref.msg_type,
-            error=error,
         )
 
 
@@ -436,22 +539,11 @@ class FccEmulator(EmulatorBase, pb.FccScreeningServicer):
         decision.ref.CopyFrom(ref)
 
         stub = pb.HubComplianceStub(self.hub_channel())
-        started = now_ns()
-        try:
-            await stub.NotifyFccDecision(decision, timeout=DEADLINE_NOTIFY_S)
-            outcome, error = ("RELEASE" if release else "BLOCK"), ""
-        except grpc.aio.AioRpcError as exc:
-            outcome, error = "ERROR", exc.code().name
-            log.warning("NotifyFccDecision failed for %s: %s", ref.uetr, error)
-        self.recorder.record(
+        await self.notify_reliably(
+            lambda: stub.NotifyFccDecision(decision, timeout=DEADLINE_NOTIFY_S),
             method="HubCompliance.NotifyFccDecision",
-            direction="MADE",
-            outcome=outcome,
-            started_ns=started,
-            uetr=ref.uetr,
-            flow=ref.flow,
-            msg_type=ref.msg_type,
-            error=error,
+            ref=ref,
+            outcome="RELEASE" if release else "BLOCK",
         )
 
 

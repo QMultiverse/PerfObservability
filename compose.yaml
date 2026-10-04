@@ -12,7 +12,7 @@
 #   stages,obs,elk the production-shaped topology, one container per stage
 #
 # Profiles:  solo | stages  = which Hub topology (alternatives, not additive)
-#            obs            = Prometheus + Grafana (metrics and dashboards)
+#            obs            = Prometheus + Grafana + kafka-exporter (metrics, dashboards)
 #            elk            = Elasticsearch + Kibana + Filebeat (logs)
 #
 # `solo` and `stages` are alternatives — the all-in-one container and the
@@ -67,8 +67,13 @@ x-stage: &stage
 services:
   # =================================================================== Kafka
   kafka:
-    image: apache/kafka:3.8.1
+    # apache/kafka:3.8.1 plus the Prometheus JMX exporter agent (:9404).
+    image: payment-hub-kafka:3.8.1
+    build:
+      context: deploy/compose/kafka
     container_name: hub-kafka
+    volumes:
+      - ./deploy/compose/kafka/jmx-exporter.yml:/etc/jmx/kafka.yml:ro
     environment:
       # Single-broker KRaft: no ZooKeeper, no separate controller.
       KAFKA_NODE_ID: "1"
@@ -87,13 +92,19 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       KAFKA_LOG_RETENTION_HOURS: "24"
       KAFKA_HEAP_OPTS: -Xms512m -Xmx1g
+      # Broker and JVM metrics for Prometheus. KAFKA_OPTS reaches every Kafka
+      # JVM in the container, the CLI tools included, so the healthcheck
+      # below clears it rather than fight the broker for port 9404.
+      KAFKA_OPTS: -javaagent:/opt/jmx/jmx_prometheus_javaagent.jar=9404:/etc/jmx/kafka.yml
       CLUSTER_ID: hub-local-cluster-0001
-    ports: ["29092:29092"]
+    ports:
+      - "29092:29092"
+      - "9404:9404"   # JMX exporter /metrics
     mem_limit: 1500m
     healthcheck:
       # This spawns a JVM, which takes its time when Elasticsearch is starting
       # on the same machine. A 5s timeout fails here for no good reason.
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "KAFKA_OPTS= /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
       interval: 15s
       timeout: 25s
       retries: 10
@@ -358,6 +369,23 @@ services:
       retries: 10
       start_period: 15s
     # No volumes for the TSDB: `down` wipes the metrics with everything else.
+
+  # Consumer-group lag as the broker sees it: committed offsets against the
+  # log end, read from the cluster. It keeps reporting while a consumer is
+  # stuck, which the Hub's own lag-at-read gauge (updated only when records
+  # arrive) cannot. Apache 2.0.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.8.0
+    container_name: hub-kafka-exporter
+    profiles: ["obs"]
+    command:
+      - --kafka.server=kafka:9092
+      - --group.filter=^cg-.*
+      - --topic.filter=^hub\..*
+    mem_limit: 64m
+    depends_on:
+      kafka:
+        condition: service_healthy
 
   grafana:
     image: grafana/grafana:11.3.0

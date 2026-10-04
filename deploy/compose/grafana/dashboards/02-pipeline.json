@@ -4,6 +4,11 @@
   "tags": ["payment-hub", "perf"],
   "timezone": "browser",
   "schemaVersion": 39,
+  "annotations": {
+    "list": [
+      {"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard", "target": {"limit": 100, "matchAny": false, "tags": [], "type": "dashboard"}}
+    ]
+  },
   "refresh": "5s",
   "time": { "from": "now-15m", "to": "now" },
   "description": "Where the time goes, and where work is accumulating. Lag and in-flight move before latency does, so this is the dashboard that shows a problem first.",

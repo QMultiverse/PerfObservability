@@ -226,6 +226,11 @@ class Processor(abc.ABC):
         if state.state in TERMINAL_STATES:
             self.store.complete(state.ref.uetr)
             return
+        if self.store.is_complete(state.ref.uetr):
+            # A network ACK can beat the dispatcher's commit, so a payment's
+            # DISPATCHED record may arrive after it COMPLETED. Applying it would
+            # put a finished payment back in the store as waiting for an ACK.
+            return
         self.store.apply_state_record(state)
         flow = get_flow(state.ref.flow)
         if flow is not None and flow.cover_pair and state.HasField("envelope"):
@@ -271,6 +276,7 @@ class ProcessorRunner:
             bus.producer(settings.transactional_id(processor.stage or processor.group_id)),
             processor.events,
         )
+        metrics.state_stores.register(processor.name, processor.store)
 
     # ------------------------------------------------------------- driving
     async def run_forever(self) -> None:
@@ -283,15 +289,23 @@ class ProcessorRunner:
         while not self._stopping.is_set():
             handled = await self.run_once()
             if handled == 0:
-                # Nothing to do; yield rather than spin the CPU.
-                await asyncio.sleep(self.settings.kafka.poll_timeout_s)
+                # Nothing to do; yield rather than spin the CPU. Idle time is
+                # waiting for records too, so it counts towards IO wait.
+                idle = self.settings.kafka.poll_timeout_s
+                await asyncio.sleep(idle)
+                metrics.kafka_io_wait.labels(self.processor.name).inc(idle)
 
     async def run_once(self) -> int:
         """Read, process and commit one batch. Returns the record count."""
+        name = self.processor.name
+        polled = time.perf_counter()
         batch = self.consumer.consume(
             max_records=self.settings.kafka.batch_size,
             timeout_s=self.settings.kafka.poll_timeout_s,
         )
+        poll_s = time.perf_counter() - polled
+        metrics.kafka_poll.labels(name).observe(poll_s)
+        metrics.kafka_io_wait.labels(name).inc(poll_s)
         if not batch:
             return 0
 
@@ -314,6 +328,7 @@ class ProcessorRunner:
         for record in work:
             await self._handle_one(record, outbox)
 
+        committing = time.perf_counter()
         try:
             self.producer.commit(self.consumer)
         except TransactionAborted as exc:
@@ -321,6 +336,9 @@ class ProcessorRunner:
             log.error("%s transaction aborted: %s", self.processor.name, exc)
             return 0
 
+        commit_s = time.perf_counter() - committing
+        metrics.kafka_commit.labels(name).observe(commit_s)
+        metrics.kafka_commit_max.observe((name,), commit_s)
         metrics.kafka_transaction_latency.labels(self.processor.name).observe(
             time.perf_counter() - started
         )
@@ -335,30 +353,47 @@ class ProcessorRunner:
                     self.processor.group_id,
                     str(record.partition),
                 ).set(record.lag)
+        # Work done after the commit (the DB sink's PostgreSQL write) is not
+        # in process latency, so it is timed on its own: without it a slow
+        # database is invisible on the process panels (perf scenario 2).
+        post_started = time.perf_counter()
         await self.processor.on_batch_committed(len(batch))
+        post_s = time.perf_counter() - post_started
+        metrics.post_commit.labels(name).observe(post_s)
+        metrics.post_commit_max.observe((name,), post_s)
         return len(batch)
 
     async def _handle_one(self, record: Record, outbox: Outbox) -> None:
+        name = self.processor.name
+        started = time.perf_counter()
         with consumed(record, self.events, self.processor.group_id):
             try:
                 await self.processor.handle(record, outbox)
+                outcome = "ok"
             except PermanentError as exc:
                 self._dead_letter(record, outbox, exc, exc.code, permanent=True)
+                outcome = "dlq"
             except RetryableError as exc:
-                self._retry(record, outbox, exc, exc.code)
+                outcome = self._retry(record, outbox, exc, exc.code)
             except Exception as exc:
                 log.exception("%s failed on %s", self.processor.name, record.topic)
-                self._retry(record, outbox, exc, "UNEXPECTED")
+                outcome = self._retry(record, outbox, exc, "UNEXPECTED")
+        elapsed = time.perf_counter() - started
+        metrics.process_latency.labels(name).observe(elapsed)
+        metrics.process_latency_max.observe((name,), elapsed)
+        metrics.records_processed.labels(name, outcome).inc()
 
     # --------------------------------------------------------- retry ladder
-    def _retry(self, record: Record, outbox: Outbox, exc: Exception, code: str) -> None:
+    def _retry(self, record: Record, outbox: Outbox, exc: Exception, code: str) -> str:
+        """Send ``record`` down the ladder; returns ``retry`` or ``dlq``."""
         attempt = _attempt_of(record) + 1
         origin = record.headers.get(HDR_ORIGIN) or tp.origin_topic(record.topic)
         if attempt > self.max_retries:
             self._dead_letter(record, outbox, exc, code, permanent=False)
-            return
+            return "dlq"
         target = tp.retry_topic(origin, attempt)
         self._publish_failure(record, outbox, exc, code, target, attempt, origin)
+        return "retry"
 
     def _dead_letter(
         self,
@@ -446,6 +481,7 @@ class ProcessorRunner:
 
     async def close(self) -> None:
         self.stop()
+        metrics.state_stores.unregister(self.processor.name)
         await self.processor.close()
         self.producer.close()
         self.consumer.close()

@@ -1,0 +1,80 @@
+# Prometheus JMX exporter rules for the broker (jmx_prometheus_javaagent 1.0.1).
+#
+# Only the beans the performance dashboard reads are exported: a catch-all
+# rule turns one broker into tens of thousands of series. Add a bean here
+# before adding a panel that needs it.
+#
+# JVM memory, memory pools and GC come from the agent's built-in JVM
+# collectors, not from these rules:
+#   jvm_memory_used_bytes{area="heap|nonheap"}
+#   jvm_memory_pool_used_bytes{pool="G1 Old Gen", ...}
+#   jvm_gc_collection_seconds_count / _sum{gc="G1 Old Generation", ...}
+
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+includeObjectNames:
+  - "kafka.server:type=BrokerTopicMetrics,*"
+  - "kafka.network:type=RequestMetrics,name=TotalTimeMs,*"
+  - "kafka.network:type=RequestMetrics,name=RequestsPerSec,*"
+  - "kafka.network:type=RequestMetrics,name=ErrorsPerSec,*"
+  - "kafka.log:type=Log,name=Size,*"
+  - "kafka.server:type=ReplicaManager,*"
+
+rules:
+  # ------------------------------------------------ records and bytes, per topic
+  # Per-topic series carry `topic`; the broker-wide total of the same bean has
+  # none. Select one or the other ({topic!=""} / {topic=""}), never sum both.
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(MessagesInPerSec|BytesInPerSec|BytesOutPerSec|FailedProduceRequestsPerSec|FailedFetchRequestsPerSec|TotalProduceRequestsPerSec|TotalFetchRequestsPerSec), topic=(.+)><>Count
+    name: kafka_server_brokertopicmetrics_$1_total
+    type: COUNTER
+    labels:
+      topic: "$2"
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(MessagesInPerSec|BytesInPerSec|BytesOutPerSec|FailedProduceRequestsPerSec|FailedFetchRequestsPerSec|TotalProduceRequestsPerSec|TotalFetchRequestsPerSec)><>Count
+    name: kafka_server_brokertopicmetrics_$1_total
+    type: COUNTER
+
+  # ----------------------------------------------------------- request timings
+  # EndTxn is the client's commit call; WriteTxnMarkers is the coordinator
+  # writing the COMMIT markers to every partition in the transaction, the
+  # "prepare to complete" phase. Mean and Max are the broker's own
+  # (exponentially decaying) figures; 99thPercentile likewise.
+  - pattern: kafka.network<type=RequestMetrics, name=TotalTimeMs, request=(.+)><>(Mean|Max|99thPercentile)
+    name: kafka_network_request_total_time_ms
+    type: GAUGE
+    labels:
+      request: "$1"
+      stat: "$2"
+  - pattern: kafka.network<type=RequestMetrics, name=TotalTimeMs, request=(.+)><>Count
+    name: kafka_network_request_total_time_ms_count
+    type: COUNTER
+    labels:
+      request: "$1"
+
+  - pattern: kafka.network<type=RequestMetrics, name=RequestsPerSec, request=(.+), version=(.+)><>Count
+    name: kafka_network_requests_total
+    type: COUNTER
+    labels:
+      request: "$1"
+      version: "$2"
+
+  # error="NONE" is the success count; the dashboard filters it out.
+  - pattern: kafka.network<type=RequestMetrics, name=ErrorsPerSec, request=(.+), error=(.+)><>Count
+    name: kafka_network_request_errors_total
+    type: COUNTER
+    labels:
+      request: "$1"
+      error: "$2"
+
+  # ------------------------------------------------------------------- disk
+  - pattern: kafka.log<type=Log, name=Size, topic=(.+), partition=(.+)><>Value
+    name: kafka_log_size_bytes
+    type: GAUGE
+    labels:
+      topic: "$1"
+      partition: "$2"
+
+  # --------------------------------------------------------------- replicas
+  - pattern: kafka.server<type=ReplicaManager, name=(PartitionCount|LeaderCount|UnderReplicatedPartitions|OfflineReplicaCount)><>Value
+    name: kafka_server_replicamanager_$1
+    type: GAUGE

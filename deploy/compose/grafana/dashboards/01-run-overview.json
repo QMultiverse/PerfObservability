@@ -4,6 +4,11 @@
   "tags": ["payment-hub", "perf"],
   "timezone": "browser",
   "schemaVersion": 39,
+  "annotations": {
+    "list": [
+      {"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard", "target": {"limit": 100, "matchAny": false, "tags": [], "type": "dashboard"}}
+    ]
+  },
   "refresh": "5s",
   "time": { "from": "now-15m", "to": "now" },
   "description": "The panel to watch during a run. NOTE: TPS here is the Hub's own view from hub_payments_state_total. The authoritative figures are the ESS recorder's T4 handoff and the status tracker's T6 completion (performance-testing.md 2.1); ess_transactions_total is not built yet.",
@@ -227,6 +232,21 @@
           "refId": "A",
           "expr": "sum by (target) (rate(hub_payments_retried_total[1m]))",
           "legendFormat": "{{target}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Waiting for the network ACK",
+      "description": "Payments handed to FIN / SnF and not yet ACKed. Overdue = waiting longer than the ACK matcher's timeout (60 s). An overdue count that does not fall back to 0 is a lost ACK: the payment will stay DISPATCHED.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "lineWidth": 2, "fillOpacity": 10 } } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (overdue) (hub_awaiting_ack)",
+          "legendFormat": "overdue={{overdue}}"
         }
       ]
     }

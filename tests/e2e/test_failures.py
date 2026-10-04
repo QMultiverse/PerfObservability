@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from hub_model import proto as pb
 from hub_model import topics as tp
 from hub_model.envelope import now_ns
@@ -109,6 +110,31 @@ async def test_fcc_outage_retries_then_recovers(hub: Harness) -> None:
     # The failure is visible on the status stream as FAILED, not REJECTED.
     states = [pb.state_name(e.state) for e in hub.status_events(delivery.uetr)]
     assert "FAILED" in states
+
+
+async def test_a_dispatch_retried_after_an_snf_outage_completes(
+    hub: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scenario 3's bug A: the payment went round the ladder, was dispatched and
+    ACKed, yet the status view kept reporting FAILED."""
+    import hub.common.retry_consumer as retry_consumer
+    from ess.profiles import Profile
+
+    hub.ess.profiles.set(Profile(target="SNF", outage_until_ns=-1, delivery_notifications=True))
+    delivery = hub.ess.sender.build(PACS_008, flow=FLOW_MX_SNF_PACS008)
+    await hub.ess.sender.deliver(delivery)
+    retry_topic = tp.OUT_MX + tp.RETRY_30S_SUFFIX
+    await hub.settle(until=lambda: bool(hub.bus.records(retry_topic)), timeout_s=5.0)
+    assert hub.state_of(delivery.uetr) == "FAILED"
+
+    # The outage ends; the retry consumer's clock moves past the 30 s delay.
+    hub.ess.profiles.set(Profile(target="SNF", delivery_notifications=True))
+    monkeypatch.setattr(retry_consumer, "now_ns", lambda: now_ns() + 31_000_000_000)
+    await hub.runners["retry"].run_once()
+
+    assert await hub.run_until_state(delivery.uetr, "COMPLETED") == "COMPLETED"
+    states = [pb.state_name(e.state) for e in hub.status_events(delivery.uetr)]
+    assert states[-3:] == ["FAILED", "DISPATCHED", "COMPLETED"]
 
 
 async def test_fin_outage_makes_deliver_unavailable(hub: Harness) -> None:

@@ -14,6 +14,7 @@ import logging
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from . import metrics
 from .messaging import Bus, BusConsumer, Record, TopicSpec, TransactionAborted
 
 log = logging.getLogger(__name__)
@@ -194,7 +195,28 @@ class KafkaConsumer:
                 "fetch.min.bytes": 1,
             }
         )
-        self._consumer.subscribe(topics)
+        self._consumer.subscribe(
+            topics,
+            on_assign=self._on_assign,
+            on_revoke=self._on_revoke,
+            on_lost=self._on_lost,
+        )
+
+    # Rebalance callbacks: they run on the polling thread, inside consume().
+    def _on_assign(self, _consumer: Any, partitions: list[Any]) -> None:
+        self._rebalanced("assign", partitions)
+
+    def _on_revoke(self, _consumer: Any, partitions: list[Any]) -> None:
+        self._rebalanced("revoke", partitions)
+
+    def _on_lost(self, _consumer: Any, partitions: list[Any]) -> None:
+        self._rebalanced("lost", partitions)
+
+    def _rebalanced(self, event: str, partitions: list[Any]) -> None:
+        metrics.kafka_rebalances.labels(self.group_id, event).inc()
+        log.info("%s %s %d partition(s)", self.group_id, event, len(partitions))
+        assigned = len(partitions) if event == "assign" else 0
+        metrics.kafka_assigned_partitions.labels(self.group_id).set(assigned)
 
     def consume(self, max_records: int = 500, timeout_s: float = 0.05) -> list[Record]:
         from confluent_kafka import KafkaError

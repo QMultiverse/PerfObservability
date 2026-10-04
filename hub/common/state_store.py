@@ -18,9 +18,11 @@ replace it behind the same interface without touching a processor.
 
 from __future__ import annotations
 
+import itertools
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import Final
 
 from hub_model import proto as pb
 from hub_model.envelope import is_forward, merge_stages
@@ -71,6 +73,23 @@ class StateStore:
     def __len__(self) -> int:
         with self._lock:
             return len(self._entries)
+
+    def size_stats(self, sample: int = 1_000) -> tuple[int, int, int]:
+        """(working keys, remembered completed keys, approximate bytes).
+
+        Read at every Prometheus scrape, so the byte figure is extrapolated
+        from at most ``sample`` entries rather than walking a large store
+        under the lock: serialised envelope sizes plus the UETR keys.
+        """
+        with self._lock:
+            working = len(self._entries)
+            completed = len(self._completed)
+            measured = list(itertools.islice(self._entries.values(), sample))
+        if not measured:
+            return working, completed, completed * _UETR_BYTES
+        sampled = sum(_entry_bytes(entry) for entry in measured)
+        approx = sampled * working // len(measured) + completed * _UETR_BYTES
+        return working, completed, approx
 
     def __iter__(self) -> Iterator[Entry]:
         with self._lock:
@@ -203,6 +222,15 @@ class StateStore:
             return None
         return entry.envelope
 
+    def count_in_state(self, state: int, *, updated_before_ns: int = 0) -> int:
+        """Payments in ``state``; with ``updated_before_ns``, only those older."""
+        with self._lock:
+            return sum(
+                1
+                for e in self._entries.values()
+                if e.state == state and (not updated_before_ns or e.updated_ns < updated_before_ns)
+            )
+
     def held_count(self) -> int:
         with self._lock:
             return sum(1 for e in self._entries.values() if e.state == pb.HELD)
@@ -216,6 +244,16 @@ class StateStore:
             env = entry.envelope
             entry.state = pb.SCREENED
             return _copy(env)
+
+
+_UETR_BYTES: Final = 36
+
+
+def _entry_bytes(entry: Entry) -> int:
+    size = _UETR_BYTES + sum(len(stage) for stage in entry.stages_done)
+    if entry.envelope is not None:
+        size += entry.envelope.ByteSize()
+    return size + sum(leg.ByteSize() for leg in entry.cover_legs.values())
 
 
 def _copy(env: PaymentEnvelope) -> PaymentEnvelope:

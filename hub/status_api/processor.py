@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 from hub_model import proto as pb
 from hub_model import topics as tp
-from hub_model.envelope import TERMINAL_STATES, end_to_end_seconds, state_rank
+from hub_model.envelope import end_to_end_seconds, supersedes
 from hub_model.proto import StatusEvent
 from hub_telemetry.events import Events
 from hub_telemetry.messaging import Record
@@ -53,9 +53,8 @@ class PaymentStatus:
     service: str = ""
     run_id: str = ""
     updated_ns: int = 0
-    #: Rank of the state currently reported, so a late event for an earlier
-    #: stage cannot pull the payment backwards.
-    rank: int = 0
+    #: The state currently reported, as its enum value, for supersedes().
+    state_code: int = 0
     history: list[dict[str, Any]] = field(default_factory=list)
     timings: dict[str, int] = field(default_factory=dict)
     end_to_end_s: float | None = None
@@ -119,19 +118,12 @@ class StatusView:
             if elapsed is not None:
                 entry.end_to_end_s = elapsed
 
-            # The *current* state, though, only ever moves forward. A network
-            # ACK can beat the dispatcher's own transaction commit, so
-            # COMPLETED legitimately arrives before DISPATCHED; without this
-            # guard the later, earlier-stage event would overwrite the
-            # terminal one.
-            rank = state_rank(event.state)
-            if entry.rank and (
-                rank < entry.rank
-                or (entry.rank in _TERMINAL_RANKS and event.state not in TERMINAL_STATES)
-            ):
+            # The *current* state, though, only ever moves forward (FAILED,
+            # being transient, by time): see hub_model.envelope.supersedes.
+            if not supersedes(entry.state_code, entry.updated_ns, event.state, event.emitted_ns):
                 return entry
 
-            entry.rank = rank
+            entry.state_code = event.state
             entry.state = state
             entry.reason = event.reason
             entry.error_code = event.error_code
@@ -177,9 +169,6 @@ class StatusView:
     def __len__(self) -> int:
         with self._lock:
             return len(self._by_uetr)
-
-
-_TERMINAL_RANKS = frozenset(state_rank(s) for s in TERMINAL_STATES)
 
 
 def _merge_timings(existing: dict[str, int], incoming: dict[str, int]) -> dict[str, int]:

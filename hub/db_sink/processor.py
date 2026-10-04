@@ -14,12 +14,16 @@ dry-run mode and only counts — which is what local Compose and the tests use.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Final
 
 from hub_model import proto as pb
 from hub_model import topics as tp
 from hub_model.envelope import state_rank
 from hub_model.proto import StatusEvent
+from hub_telemetry import metrics
 from hub_telemetry.events import Events
 from hub_telemetry.messaging import Record
 
@@ -102,12 +106,17 @@ ON CONFLICT (uetr) DO UPDATE SET
     t6_completed_ns = COALESCE(EXCLUDED.t6_completed_ns, payment.t6_completed_ns),
     updated_ns      = EXCLUDED.updated_ns,
     updated_at      = now()
--- A payment only moves forward. A network ACK can beat the dispatcher's own
--- transaction commit, so COMPLETED legitimately arrives before DISPATCHED;
--- guarding on the timestamp alone would let the later, earlier-stage event
--- overwrite the terminal one. Once terminal, nothing changes.
+-- The same rule as hub_model.envelope.supersedes. Once terminal, nothing
+-- changes. FAILED is transient (the payment is on the retry ladder), so moving
+-- into or out of it goes by time. Otherwise a payment only moves forward: a
+-- network ACK can beat the dispatcher's own commit, so COMPLETED legitimately
+-- arrives before DISPATCHED and must not be overwritten by it.
 WHERE payment.state NOT IN ('COMPLETED', 'REJECTED', 'BLOCKED')
-  AND EXCLUDED.state_rank >= payment.state_rank;
+  AND CASE
+        WHEN 'FAILED' IN (payment.state, EXCLUDED.state)
+          THEN EXCLUDED.updated_ns >= payment.updated_ns
+        ELSE EXCLUDED.state_rank >= payment.state_rank
+      END;
 """
 
 _AUDIT: Final = """
@@ -135,10 +144,11 @@ class DbSink(Processor):
         if self._conn is None:
             import psycopg
 
-            self._conn = psycopg.connect(self.settings.database_url, autocommit=False)
-            with self._conn.cursor() as cur:
-                cur.execute(SCHEMA)
-            self._conn.commit()
+            with _db_call("connect"):
+                self._conn = psycopg.connect(self.settings.database_url, autocommit=False)
+                with self._conn.cursor() as cur:
+                    cur.execute(SCHEMA)
+                self._conn.commit()
             log.info("db sink connected")
         return self._conn
 
@@ -166,26 +176,55 @@ class DbSink(Processor):
             return
         try:
             conn = self.connection()
-            with conn.cursor() as cur:
+            _set_connections(active=1)
+            with _db_call("write_batch"), conn.cursor() as cur:
                 for event in batch:
                     params = _params(event)
-                    cur.execute(_UPSERT, params)
-                    cur.execute(_AUDIT, params)
-            conn.commit()
+                    with _db_call("upsert"):
+                        cur.execute(_UPSERT, params)
+                    with _db_call("audit_insert"):
+                        cur.execute(_AUDIT, params)
+                with _db_call("commit"):
+                    conn.commit()
             self.written += len(batch)
+            _set_connections(idle=1)
         except Exception as exc:
             if self._conn is not None:
                 try:
-                    self._conn.rollback()
+                    with _db_call("rollback"):
+                        self._conn.rollback()
                     self._conn.close()
                 finally:
                     self._conn = None
+            _set_connections()
             raise RetryableError(f"database write failed: {exc}", code="DB_WRITE") from exc
 
     async def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+        _set_connections()
+
+
+@contextmanager
+def _db_call(operation: str) -> Iterator[None]:
+    """Time and count one database call, as the JDBC panels expect."""
+    started = time.perf_counter()
+    outcome = "error"
+    try:
+        yield
+        outcome = "ok"
+    finally:
+        metrics.db_calls.labels(SERVICE_NAME, operation, outcome).inc()
+        metrics.db_call_latency.labels(SERVICE_NAME, operation).observe(
+            time.perf_counter() - started
+        )
+
+
+def _set_connections(*, active: int = 0, idle: int = 0) -> None:
+    """The sink holds one connection: idle between batches, active during one."""
+    metrics.db_connections.labels(SERVICE_NAME, "active").set(active)
+    metrics.db_connections.labels(SERVICE_NAME, "idle").set(idle)
 
 
 def _params(event: StatusEvent) -> dict[str, Any]:

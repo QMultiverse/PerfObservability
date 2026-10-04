@@ -565,6 +565,46 @@ Every payment is followed by UETR from injection to final status: the completion
 4. Kafka cluster health.
 5. Generator health.
 
+**Implemented locally** (`deploy/compose/grafana/dashboards/`): `1 · Run overview`, `2 · Pipeline stage breakdown`, and `3 · Performance deep-dive`. The third covers the service deep-dive and the Kafka health views (3 and 4 above). Its panels are named after their Kafka Streams / JDBC / JVM counterparts. Where the Hub is Python, each panel shows the nearest equivalent and its description says what it measures:
+
+| Panel group | Source | Metrics |
+| --- | --- | --- |
+| Simulator: E2E latency, M1 sent / M2 received | ESS recorder. M1 is the inbound `Deliver*`; M2 is the Hub's `SendMt` / `SendMx` for the same UETR, matched first in, first out. | `ess_e2e_latency_seconds`, `ess_m1_sent_total`, `ess_m2_received_total`, `ess_m1_pending` |
+| Hub E2E latency (T0 → T6) | ACK matcher | `hub_payment_end_to_end_seconds` |
+| Consumer lag, consumer view | Each stage, lag at read | `hub_kafka_consumer_lag` |
+| Consumer lag, broker view | kafka-exporter (`obs` profile) | `kafka_consumergroup_lag` |
+| Processed / consumed records | `ProcessorRunner` | `hub_records_processed_total{outcome}`, `hub_kafka_consumed_total` |
+| Process latency avg / max, poll time, IO wait ratio | `ProcessorRunner`. Max is the largest value over the last 30–60 s. IO wait is poll time plus idle back-off as a share of the stage thread's wall clock. | `hub_process_latency_seconds`, `hub_process_latency_max_seconds`, `hub_kafka_poll_seconds`, `hub_kafka_io_wait_seconds_total` |
+| Commit latency avg / max, commits per second | `ProcessorRunner`, around `producer.commit` | `hub_kafka_commit_seconds`, `hub_kafka_commit_max_seconds`, `hub_kafka_transactions_aborted_total` |
+| Rebalances | Consumer assign / revoke / lost callbacks | `hub_kafka_rebalances_total`, `hub_kafka_assigned_partitions` |
+| Broker records / bytes in and out, errors, disk, prepare → complete | JMX exporter agent in the broker (`deploy/compose/kafka/`). Prepare → complete is `WriteTxnMarkers` request time. | `kafka_server_brokertopicmetrics_*_total`, `kafka_network_request_total_time_ms`, `kafka_network_request_errors_total`, `kafka_log_size_bytes` |
+| gRPC client / server calls and duration | Interceptors in `hub-telemetry`. Client calls count once per attempt. | `hub_grpc_{client,server}_calls_total`, `hub_grpc_{client,server}_latency_seconds`, `hub_grpc_client_retries_total` |
+| JDBC → database | DB sink (psycopg) | `hub_db_connections{state}`, `hub_db_calls_total`, `hub_db_call_seconds` |
+| Kafka Streams store size / keys per instance | The in-memory state store (estimated bytes) | `hub_state_store_bytes`, `hub_state_store_keys{kind}` |
+| Memory, Kafka broker | JMX agent's JVM collectors | `jvm_memory_used_bytes{area}`, `jvm_memory_pool_used_bytes`, `jvm_gc_collection_seconds` |
+| Memory, Hub and ESS | Python process and GC collectors. Generation 2 is the full GC. | `process_resident_memory_bytes`, `hub_python_allocated_blocks`, `hub_python_gc_pause_seconds{generation}` |
+
+Zeebe and PKI panels are deliberately left out: neither is part of the Payment Hub.
+
+**Local fault-injection runs (October 2026)**
+
+Before the framework exists, five faults were injected by hand on the local stack (3 payments a second, the usual MT/MX mix, a baseline, a fault window and a recovery window, each marked as a Grafana annotation) to check that the dashboards lead from a symptom to its cause. What each one taught:
+
+| Scenario | Injected with | Symptom first seen on | Cause found on | What it found |
+| --- | --- | --- | --- | --- |
+| 1. Slow dependency | ESS FCC profile: `Screen` lognormal p50 300 ms, p99 1.5 s | E2E Latency (Simulator), M1/M2 gap | IO Wait Ratio (screening near 0), gRPC client call duration (`Screen`) | Latency rose ~40x, far beyond the dependency's own slowdown: screening calls FCC one record at a time inside one transaction, so a slow call grows the batch and every payment in it waits for the whole batch. |
+| 2. Slow database | `docker update --cpus 0.02 hub-postgres` | Consumer Lag (Broker), `cg-db-sink` only | JDBC Calls (ceiling), JDBC idle connections (pinned active) | Customers saw nothing while PostgreSQL ran 64 s behind: *completed* is not *persisted*. At 0.1 CPU nothing happened, which measured the database's headroom. |
+| 3. Network outage | ESS SnF outage for 60 s | gRPC client calls (`SendMx UNAVAILABLE`) | Retry topics on Broker records in; per-UETR journey in Kibana | The retry ladder works, but a retried payment stayed FAILED after it completed (fixed: FAILED is transient, see `supersedes`). The 30 s tier really takes 30-60 s. |
+| 4. Slow broker | `docker update --cpus 0.5 hub-kafka` | E2E Latency (Simulator), edge deadline misses | Streams commit latency vs Process latency (~150 ms vs ~3 ms) | Throughput held and lag stayed near zero while latency rose 10x: lag-based alerting cannot see this. Client delivery errors over-count failures, because a timed-out `Deliver*` was often written durably. |
+| 5. Memory growth | ESS FCC: 30 % hits, decision after 60 min | (see the run notes) | Kafka stream number of keys per instance, memory rows | Soak behaviour of payments held for an FCC decision. |
+
+Cross-cutting findings:
+
+- **Lost network ACKs** left payments DISPATCHED forever in scenarios 1, 3 and 4. Fixed in two halves: the ESS redelivers notifications as a real network would, and the Hub reports any payment waiting past `ACK_OVERDUE_S` on `hub_awaiting_ack{overdue="true"}`.
+- **Unbounded redelivery caused a retry storm** while the stack was warming up (scenario 2's first attempt): every round also carried the interceptor's own retries. Redelivery is now one call per round, backs off from 2 s to 60 s and is capped at 5 a second per emulator.
+- **Readiness has to include a healthy baseline**, not just running containers: two runs were spoiled by consumers that had silently left their groups after the host slept, and one by a stack still warming up. Before a run: every consumer group holds partitions, lag is zero, and a short warm-up batch completes with E2E p95 under 1 s.
+- **Panels that matter most for diagnosis:** Consumer Lag per group (broker view), IO Wait Ratio per stage, commit latency against process latency, and the outbound gRPC panels. The metrics show *that* something is wrong; the per-UETR journey in Kibana shows *what*.
+
 ## 8. Test types and scenario catalogue
 
 Ten standard scenarios cover capacity, stability and resilience; each is a folder in git with its workload profile, environment manifest and SLO file.

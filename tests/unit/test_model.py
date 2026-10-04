@@ -300,6 +300,43 @@ def test_state_rank_orders_the_pipeline() -> None:
     assert state_rank(999) == 0, "an unknown state ranks lowest, never highest"
 
 
+# FAILED means "on the retry ladder": transient, ordered by time, not rank.
+T0, T1, T2 = 1_000, 2_000, 3_000
+
+
+@pytest.mark.parametrize(
+    ("current", "current_ns", "proposed", "proposed_ns", "expected"),
+    [
+        # The pipeline moves forward, and the ACK race keeps COMPLETED.
+        (pb.SETTLED, T0, pb.DISPATCHED, T1, True),
+        (pb.COMPLETED, T1, pb.DISPATCHED, T0, False),
+        (pb.DISPATCHED, T1, pb.SETTLED, T2, False),
+        # Bug A: a retried payment leaves FAILED when it moves on.
+        (pb.FAILED, T0, pb.DISPATCHED, T1, True),
+        (pb.FAILED, T0, pb.COMPLETED, T1, True),
+        (pb.SETTLED, T0, pb.FAILED, T1, True),
+        # A stale FAILED cannot overwrite what happened after it, and a stale
+        # event cannot overwrite a newer FAILED.
+        (pb.DISPATCHED, T1, pb.FAILED, T0, False),
+        (pb.FAILED, T1, pb.SETTLED, T0, False),
+        # Terminal is final; REJECTED after FAILED (the DLQ) is not blocked.
+        (pb.COMPLETED, T0, pb.FAILED, T2, False),
+        (pb.FAILED, T0, pb.REJECTED, T1, True),
+        (pb.PAYMENT_STATE_UNSPECIFIED, 0, pb.FAILED, T0, True),
+    ],
+)
+def test_supersedes(
+    current: int, current_ns: int, proposed: int, proposed_ns: int, expected: bool
+) -> None:
+    from hub_model.envelope import supersedes
+
+    assert supersedes(int(current), current_ns, int(proposed), proposed_ns) is expected
+
+
+def test_failed_is_not_terminal() -> None:
+    assert int(pb.FAILED) not in TERMINAL_STATES
+
+
 def test_the_status_view_never_moves_a_payment_backwards() -> None:
     """A network ACK can beat the dispatcher's own transaction commit, so
     COMPLETED legitimately arrives before DISPATCHED on hub.pay.status.

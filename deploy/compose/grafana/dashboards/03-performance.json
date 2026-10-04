@@ -1,0 +1,2662 @@
+{
+  "uid": "hub-performance",
+  "title": "3 · Performance deep-dive",
+  "tags": [
+    "payment-hub",
+    "perf"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "description": "Simulator, Kafka processing and lag, transactions, gRPC, database, disk and memory. Panels named after Kafka Streams / JDBC / JVM figures show the Hub's Python equivalents; each panel's description says what it measures. Broker panels need the JMX exporter on the kafka service; broker-side lag needs kafka-exporter (obs profile).",
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Stage",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(hub_records_processed_total, service)",
+          "refId": "service"
+        },
+        "definition": "label_values(hub_records_processed_total, service)",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [],
+          "type": "dashboard"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Simulator",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": [],
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "E2E Latency (Simulator)",
+      "description": "M1 sent to M2 received, timed by the ESS: from the moment it starts HubInbound.Deliver* (playing FIN / SnF inbound) to the moment the Hub's SendMt / SendMx reaches the emulated network for the same UETR. Includes the edge and every gRPC hop. Format and flow are the inbound side (M1).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le, format) (rate(ess_e2e_latency_seconds_bucket{}[$__rate_interval])))",
+          "legendFormat": "p50 {{format}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, format) (rate(ess_e2e_latency_seconds_bucket{}[$__rate_interval])))",
+          "legendFormat": "p95 {{format}}"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, format) (rate(ess_e2e_latency_seconds_bucket{}[$__rate_interval])))",
+          "legendFormat": "p99 {{format}}"
+        }
+      ],
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "M1 sent (Simulator), M2 received (Simulator)",
+      "description": "M1: inbound messages the ESS delivered and the Hub accepted. M2: outbound messages the Hub sent to the emulated FIN / SnF. Unmatched M2s are repeats (the Hub retrying a send) with no M1 waiting. The gap between the lines is work in flight inside the Hub.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (format) (rate(ess_m1_sent_total[$__rate_interval]))",
+          "legendFormat": "M1 sent {{format}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (format) (rate(ess_m2_received_total{matched=\"true\"}[$__rate_interval]))",
+          "legendFormat": "M2 received {{format}}"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (format) (rate(ess_m2_received_total{matched=\"false\"}[$__rate_interval]))",
+          "legendFormat": "M2 unmatched {{format}}"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(ess_m1_pending)",
+          "legendFormat": "M1 awaiting M2"
+        }
+      ],
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "E2E Latency",
+      "description": "The Hub's own end-to-end histogram, T0 (network delivery) to T6 (COMPLETED on the network ACK), observed by the ACK matcher. Compare with the simulator's view on the left.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le, format) (rate(hub_payment_end_to_end_seconds_bucket{}[$__rate_interval])))",
+          "legendFormat": "p50 {{format}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, format) (rate(hub_payment_end_to_end_seconds_bucket{}[$__rate_interval])))",
+          "legendFormat": "p95 {{format}}"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, format) (rate(hub_payment_end_to_end_seconds_bucket{}[$__rate_interval])))",
+          "legendFormat": "p99 {{format}}"
+        }
+      ],
+      "id": 4
+    },
+    {
+      "type": "row",
+      "title": "Processing & Lag",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": [],
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer Lag (Consumer)",
+      "description": "Lag at read, reported by each stage: log end minus the offset just read. Only updates when a stage reads, so a stuck stage keeps its last value — use the broker view next to it for that.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (group, topic) (hub_kafka_consumer_lag{service=~\"$service\"})",
+          "legendFormat": "{{group}} · {{topic}}"
+        }
+      ],
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer Lag (Broker)",
+      "description": "Committed offset against log end, read from the cluster by kafka-exporter (obs profile). Keeps moving while a consumer is stuck or down. Clamped at 0: on transactional topics the exporter can read the log end before the committed offset and briefly report a negative lag.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (consumergroup, topic) (clamp_min(kafka_consumergroup_lag, 0))",
+          "legendFormat": "{{consumergroup}} · {{topic}}"
+        }
+      ],
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "Streams processed records per second",
+      "description": "Records each stage processed (state-topic records excluded), by outcome. retry / dlq are records sent down the retry ladder.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service, outcome) (rate(hub_records_processed_total{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{service}} {{outcome}}"
+        }
+      ],
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "Listener consumed records per second",
+      "description": "Every record each consumer group read, the compacted hub.pay.state included.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (group, topic) (rate(hub_kafka_consumed_total{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{group}} · {{topic}}"
+        }
+      ],
+      "id": 9
+    },
+    {
+      "type": "timeseries",
+      "title": "Broker records in per sec",
+      "description": "MessagesInPerSec per topic, from the broker's JMX exporter. Sizing only: one payment is several records on several topics, so this is not TPS.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 25,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (topic) (rate(kafka_server_brokertopicmetrics_messagesinpersec_total{topic!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "id": 10
+    },
+    {
+      "type": "timeseries",
+      "title": "Broker records in total",
+      "description": "Cumulative records appended per topic since the broker started (resets with the broker: no named volumes locally).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (topic) (kafka_server_brokertopicmetrics_messagesinpersec_total{topic!=\"\"})",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "id": 11
+    },
+    {
+      "type": "timeseries",
+      "title": "Broker bytes in per sec",
+      "description": "BytesInPerSec per topic. Raw MT/MX travel only on *.raw topics (claim-check), so those dominate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 25,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (topic) (rate(kafka_server_brokertopicmetrics_bytesinpersec_total{topic!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "id": 12
+    },
+    {
+      "type": "timeseries",
+      "title": "Broker bytes out per sec",
+      "description": "BytesOutPerSec per topic: every consumer group reading a topic multiplies it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 25,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (topic) (rate(kafka_server_brokertopicmetrics_bytesoutpersec_total{topic!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "id": 13
+    },
+    {
+      "type": "row",
+      "title": "Transactions and Commits",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "panels": [],
+      "id": 14
+    },
+    {
+      "type": "timeseries",
+      "title": "Streams commit latency average",
+      "description": "producer.commit per stage: send_offsets_to_transaction plus commit_transaction, i.e. the client side of one read-process-write transaction.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service) (rate(hub_kafka_commit_seconds_sum{service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(hub_kafka_commit_seconds_count{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "id": 15
+    },
+    {
+      "type": "timeseries",
+      "title": "Broker prepare to complete average",
+      "description": "WriteTxnMarkers: the transaction coordinator writing COMMIT markers to every partition in the transaction, the PrepareCommit to CompleteCommit phase. EndTxn is the client's commit request as the broker times it. Broker mean (exponentially decaying), in ms.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "kafka_network_request_total_time_ms{request=\"WriteTxnMarkers\", stat=\"Mean\"}",
+          "legendFormat": "WriteTxnMarkers (prepare → complete)"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "kafka_network_request_total_time_ms{request=\"EndTxn\", stat=\"Mean\"}",
+          "legendFormat": "EndTxn"
+        }
+      ],
+      "id": 16
+    },
+    {
+      "type": "timeseries",
+      "title": "Commit per second",
+      "description": "Committed and aborted transactions per stage. One commit is one batch.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service) (rate(hub_kafka_commit_seconds_count{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{service}} committed"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service) (rate(hub_kafka_transactions_aborted_total{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{service}} aborted"
+        }
+      ],
+      "id": 17
+    },
+    {
+      "type": "timeseries",
+      "title": "Streams commit latency max",
+      "description": "Longest commit per stage over the last 30-60 s.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hub_kafka_commit_max_seconds{service=~\"$service\"}",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "id": 18
+    },
+    {
+      "type": "timeseries",
+      "title": "Broker prepare to complete max",
+      "description": "Broker-side Max of the same two requests.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "kafka_network_request_total_time_ms{request=\"WriteTxnMarkers\", stat=\"Max\"}",
+          "legendFormat": "WriteTxnMarkers (prepare → complete)"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "kafka_network_request_total_time_ms{request=\"EndTxn\", stat=\"Max\"}",
+          "legendFormat": "EndTxn"
+        }
+      ],
+      "id": 19
+    },
+    {
+      "type": "timeseries",
+      "title": "Broker errors",
+      "description": "Request errors by API and error code (error=NONE, the success count, excluded), plus failed produce / fetch requests.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (request, error) (rate(kafka_network_request_errors_total{error!=\"NONE\"}[$__rate_interval]))",
+          "legendFormat": "{{request}} {{error}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(kafka_server_brokertopicmetrics_failedproducerequestspersec_total{topic=\"\"}[$__rate_interval]))",
+          "legendFormat": "failed produce"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(kafka_server_brokertopicmetrics_failedfetchrequestspersec_total{topic=\"\"}[$__rate_interval]))",
+          "legendFormat": "failed fetch"
+        }
+      ],
+      "id": 20
+    },
+    {
+      "type": "row",
+      "title": "Process",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      },
+      "panels": [],
+      "id": 21
+    },
+    {
+      "type": "timeseries",
+      "title": "Process latency avg",
+      "description": "Time to process one record in a stage, excluding the commit: parse, screen, route, dispatch, including any outbound gRPC call. 'post-commit' is work done after the commit, per batch: the DB sink's PostgreSQL write.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service) (rate(hub_process_latency_seconds_sum{service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(hub_process_latency_seconds_count{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{service}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service) (rate(hub_post_commit_seconds_sum{service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(hub_post_commit_seconds_count{service=~\"$service\"}[$__rate_interval])) > 0",
+          "legendFormat": "post-commit {{service}}"
+        }
+      ],
+      "id": 22
+    },
+    {
+      "type": "timeseries",
+      "title": "Rebalance",
+      "description": "Partition assignment changes per consumer group since the process started (a step up is a rebalance), and the partitions each group holds now. Cumulative rather than increase(): Prometheus cannot see a counter's first value, and the first rebalance happens at startup.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (group, event) (hub_kafka_rebalances_total)",
+          "legendFormat": "{{group}} {{event}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (group) (hub_kafka_assigned_partitions)",
+          "legendFormat": "{{group}} partitions held"
+        }
+      ],
+      "id": 23
+    },
+    {
+      "type": "timeseries",
+      "title": "Process Total",
+      "description": "Records processed since each process started, by stage and outcome.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service, outcome) (hub_records_processed_total{service=~\"$service\"})",
+          "legendFormat": "{{service}} {{outcome}}"
+        }
+      ],
+      "id": 24
+    },
+    {
+      "type": "timeseries",
+      "title": "Process latency max",
+      "description": "Longest single-record processing time per stage over the last 30-60 s, and the longest post-commit step (the DB sink's write, per batch).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hub_process_latency_max_seconds{service=~\"$service\"}",
+          "legendFormat": "{{service}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hub_post_commit_max_seconds{service=~\"$service\"} > 0",
+          "legendFormat": "post-commit {{service}}"
+        }
+      ],
+      "id": 25
+    },
+    {
+      "type": "timeseries",
+      "title": "Poll time",
+      "description": "Time inside one consumer poll. Bounded by the poll timeout when a stage is idle, so a high average with low lag just means quiet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service) (rate(hub_kafka_poll_seconds_sum{service=~\"$service\"}[$__rate_interval])) / sum by (service) (rate(hub_kafka_poll_seconds_count{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "avg {{service}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, service) (rate(hub_kafka_poll_seconds_bucket{service=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{service}}"
+        }
+      ],
+      "id": 26
+    },
+    {
+      "type": "timeseries",
+      "title": "IO Wait Ratio",
+      "description": "Share of each stage thread's wall clock spent waiting for records (polling plus idle back-off). Near 1 = idle; falling towards 0 = the stage is saturated and processing back to back.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service) (rate(hub_kafka_io_wait_seconds_total{service=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "id": 27
+    },
+    {
+      "type": "row",
+      "title": "gRPC",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      },
+      "panels": [],
+      "id": 28
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC client calls (outbound)",
+      "description": "Calls made, per attempt: a retried call counts once per attempt, as the network sees it. Hub → FIN / SnF / FCC, and ESS → Hub.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, method, status) (rate(hub_grpc_client_calls_total[$__rate_interval]))",
+          "legendFormat": "{{job}} {{method}} {{status}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, method, status) (rate(hub_grpc_client_retries_total[$__rate_interval]))",
+          "legendFormat": "{{job}} {{method}} retried {{status}}"
+        }
+      ],
+      "id": 29
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC client call duration (outbound)",
+      "description": "Per attempt. Deadlines: Deliver* 200 ms, Send* 500 ms, Screen 1 s.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le, method) (rate(hub_grpc_client_latency_seconds_bucket{}[$__rate_interval])))",
+          "legendFormat": "p50 {{method}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, method) (rate(hub_grpc_client_latency_seconds_bucket{}[$__rate_interval])))",
+          "legendFormat": "p99 {{method}}"
+        }
+      ],
+      "id": 30
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC server calls (inbound)",
+      "description": "Calls served: HubInbound / HubNetworkEvents / HubCompliance on the Hub, FinGateway / SnfGateway / FccScreening on the ESS. The ESS control API (EssControl) is excluded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 77
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, method, status) (rate(hub_grpc_server_calls_total{service!=\"ess.v1.EssControl\"}[$__rate_interval]))",
+          "legendFormat": "{{job}} {{method}} {{status}}"
+        }
+      ],
+      "id": 31
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC server call duration (inbound)",
+      "description": "Served-call latency. Deliver* replies only after the acks=all Kafka write.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 77
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le, method) (rate(hub_grpc_server_latency_seconds_bucket{service!=\"ess.v1.EssControl\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{method}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, method) (rate(hub_grpc_server_latency_seconds_bucket{service!=\"ess.v1.EssControl\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{method}}"
+        }
+      ],
+      "id": 32
+    },
+    {
+      "type": "row",
+      "title": "JDBC",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
+      "panels": [],
+      "id": 33
+    },
+    {
+      "type": "timeseries",
+      "title": "JDBC idle connections",
+      "description": "The Hub is Python, so this is the DB sink's PostgreSQL connection (psycopg), not a JDBC pool. Connections it holds: idle between batches, active during a write. The sink keeps one connection; zero means it is not connected (dry-run, or reconnecting after an error).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 86
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (instance) (hub_db_connections{state=\"idle\"})",
+          "legendFormat": "idle {{instance}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (instance) (hub_db_connections{state=\"active\"})",
+          "legendFormat": "active {{instance}}"
+        }
+      ],
+      "id": 34
+    },
+    {
+      "type": "timeseries",
+      "title": "JDBC Calls",
+      "description": "The DB sink's PostgreSQL calls (psycopg). Statements and transaction calls per second, by operation and outcome: upsert and audit_insert per status event, commit per batch.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 86
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (operation, outcome) (rate(hub_db_calls_total[$__rate_interval]))",
+          "legendFormat": "{{operation}} {{outcome}}"
+        }
+      ],
+      "id": 35
+    },
+    {
+      "type": "row",
+      "title": "Disk Usage",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 94
+      },
+      "panels": [],
+      "id": 36
+    },
+    {
+      "type": "timeseries",
+      "title": "Kafka disk usage",
+      "description": "Log size per topic on the broker, all partitions (kafka.log Size).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 95
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 25,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (topic) (kafka_log_size_bytes)",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "id": 37
+    },
+    {
+      "type": "timeseries",
+      "title": "Kafka streams Disk usage per instance",
+      "description": "The Kafka Streams 'disk usage per instance' equivalent. The Hub's state store is in memory (rebuilt from hub.pay.state), so this is an estimate of the bytes it holds, per process and stage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 95
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (instance, service) (hub_state_store_bytes{service=~\"$service\"}) > 0",
+          "legendFormat": "{{instance}} {{service}}"
+        }
+      ],
+      "id": 38
+    },
+    {
+      "type": "timeseries",
+      "title": "Kafka stream number of keys per instance",
+      "description": "The Hub's state store (in memory, rebuilt from hub.pay.state), in place of a Kafka Streams RocksDB store. Working keys (payments in flight, HELD, cover legs waiting) and the bounded window of completed UETRs kept for de-duplication.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 95
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (instance, service, kind) (hub_state_store_keys{service=~\"$service\"}) > 0",
+          "legendFormat": "{{instance}} {{service}} {{kind}}"
+        }
+      ],
+      "id": 39
+    },
+    {
+      "type": "row",
+      "title": "Memory",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 103
+      },
+      "panels": [],
+      "id": 40
+    },
+    {
+      "type": "timeseries",
+      "title": "Used Memory - Old Gen",
+      "description": "Kafka broker JVM. The old-generation pool: G1 Old Gen, or Tenured Gen when the JVM picks Serial GC (it does below ~1.8 GB of container memory, as locally). A sawtooth is healthy; a floor that keeps rising is not.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 104
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "jvm_memory_pool_used_bytes{job=\"kafka\", pool=~\".*(Old Gen|Tenured Gen).*\"}",
+          "legendFormat": "used {{pool}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "jvm_memory_pool_max_bytes{job=\"kafka\", pool=~\".*(Old Gen|Tenured Gen).*\"} > 0",
+          "legendFormat": "max {{pool}}"
+        }
+      ],
+      "id": 41
+    },
+    {
+      "type": "timeseries",
+      "title": "Used Memory - Heap",
+      "description": "Kafka broker JVM heap (-Xmx1g locally) against its committed and max size.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 104
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "jvm_memory_used_bytes{job=\"kafka\", area=\"heap\"}",
+          "legendFormat": "used"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "jvm_memory_committed_bytes{job=\"kafka\", area=\"heap\"}",
+          "legendFormat": "committed"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "jvm_memory_max_bytes{job=\"kafka\", area=\"heap\"} > 0",
+          "legendFormat": "max"
+        }
+      ],
+      "id": 42
+    },
+    {
+      "type": "timeseries",
+      "title": "Used Memory - Non-Heap",
+      "description": "Kafka broker JVM: metaspace, code cache and compressed class space.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 104
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "jvm_memory_used_bytes{job=\"kafka\", area=\"nonheap\"}",
+          "legendFormat": "used"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "jvm_memory_committed_bytes{job=\"kafka\", area=\"nonheap\"}",
+          "legendFormat": "committed"
+        }
+      ],
+      "id": 43
+    },
+    {
+      "type": "timeseries",
+      "title": "Full GC Pauses",
+      "description": "Kafka broker JVM. Time per second in old-generation (full) collections, and how many ran in the last minute (G1 Old Generation, or MarkSweepCompact under Serial GC). Young collections are shown for scale.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 104
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (gc) (rate(jvm_gc_collection_seconds_sum{job=\"kafka\"}[$__rate_interval]))",
+          "legendFormat": "{{gc}} s/s"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (gc) (increase(jvm_gc_collection_seconds_count{job=\"kafka\", gc=~\".*(Old|MarkSweep).*\"}[1m]))",
+          "legendFormat": "{{gc}} count / 1m"
+        }
+      ],
+      "id": 44
+    },
+    {
+      "type": "row",
+      "title": "Memory — Hub and ESS (Python, extra)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      },
+      "panels": [],
+      "id": 45
+    },
+    {
+      "type": "timeseries",
+      "title": "Used Memory - Resident (RSS)",
+      "description": "Python has no heap / old-gen split; the resident set is the figure the container's mem_limit is enforced against.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 113
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "process_resident_memory_bytes{job=~\"hub|hub-stages|ess\"}",
+          "legendFormat": "{{job}} {{instance}}"
+        }
+      ],
+      "id": 46
+    },
+    {
+      "type": "timeseries",
+      "title": "Allocated blocks",
+      "description": "Memory blocks the interpreter has allocated (sys.getallocatedblocks). Steady growth under steady load is a leak.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 113
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "hub_python_allocated_blocks{job=~\"hub|hub-stages|ess\"}",
+          "legendFormat": "{{job}} {{instance}}"
+        }
+      ],
+      "id": 47
+    },
+    {
+      "type": "timeseries",
+      "title": "Virtual memory",
+      "description": "Address space reserved by each process.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 113
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "process_virtual_memory_bytes{job=~\"hub|hub-stages|ess\"}",
+          "legendFormat": "{{job}} {{instance}}"
+        }
+      ],
+      "id": 48
+    },
+    {
+      "type": "timeseries",
+      "title": "Full GC Pauses (generation 2)",
+      "description": "Stop-the-world time per second in generation-2 collections, the Python full GC, and the p99 single pause.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 113
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, instance) (rate(hub_python_gc_pause_seconds_sum{generation=\"2\", job=~\"hub|hub-stages|ess\"}[$__rate_interval]))",
+          "legendFormat": "{{job}} {{instance}} s/s"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, job) (rate(hub_python_gc_pause_seconds_bucket{generation=\"2\", job=~\"hub|hub-stages|ess\"}[$__rate_interval])))",
+          "legendFormat": "p99 pause {{job}}"
+        }
+      ],
+      "id": 49
+    }
+  ]
+}

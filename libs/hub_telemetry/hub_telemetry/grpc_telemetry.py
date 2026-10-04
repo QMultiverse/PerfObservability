@@ -24,7 +24,7 @@ from grpc.aio import ClientCallDetails, ServerInterceptor, UnaryUnaryClientInter
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from . import baggage
+from . import baggage, metrics
 from .events import Events
 
 # Deadlines from design doc section 4.
@@ -113,14 +113,18 @@ class ServerTelemetryInterceptor(ServerInterceptor):
                 try:
                     response = await inner(request, context)
                 except grpc.RpcError as exc:
+                    code_of = getattr(exc, "code", lambda: grpc.StatusCode.UNKNOWN)
+                    status = _status_name(code_of())
+                    _observe_server(method, status, started)
                     events.grpc_server_reply(
                         method,
-                        status_code=str(getattr(exc, "code", lambda: grpc.StatusCode.UNKNOWN)()),
+                        status_code=status,
                         duration_ns=_elapsed_ns(started),
                         outcome="failure",
                     )
                     raise
                 except Exception:
+                    _observe_server(method, "INTERNAL", started)
                     events.grpc_server_reply(
                         method,
                         status_code="INTERNAL",
@@ -129,6 +133,7 @@ class ServerTelemetryInterceptor(ServerInterceptor):
                     )
                     raise
                 code = context.code() or grpc.StatusCode.OK
+                _observe_server(method, _status_name(code), started)
                 events.grpc_server_reply(
                     method,
                     status_code=code.name,
@@ -196,6 +201,7 @@ class ClientTelemetryInterceptor(UnaryUnaryClientInterceptor):
                 response = await call if hasattr(call, "__await__") else call
             except grpc.aio.AioRpcError as exc:
                 last_error = exc
+                _observe_client(method, exc.code().name, started)
                 self._events.grpc_client_reply(
                     method,
                     status_code=exc.code().name,
@@ -205,8 +211,11 @@ class ClientTelemetryInterceptor(UnaryUnaryClientInterceptor):
                 )
                 if exc.code() not in RETRYABLE or attempt == self._max_attempts:
                     raise
+                service, short = split_method(method)
+                metrics.grpc_client_retries.labels(service, short, exc.code().name).inc()
                 await asyncio.sleep(backoff_delay(attempt, rng=self._rng))
                 continue
+            _observe_client(method, "OK", started)
             self._events.grpc_client_reply(
                 method,
                 status_code="OK",
@@ -231,6 +240,30 @@ def _with_metadata(details: ClientCallDetails, metadata: Mapping[str, str]) -> C
     return replaced
 
 
+def split_method(method: str) -> tuple[str, str]:
+    """``/hub.v1.HubInbound/DeliverMx`` -> (``hub.v1.HubInbound``, ``DeliverMx``)."""
+    service, _, short = method.lstrip("/").rpartition("/")
+    return service or "unknown", short or method
+
+
+def _status_name(code: Any) -> str:
+    name = getattr(code, "name", None)
+    return str(name) if name else str(code)
+
+
+def _observe_server(method: str, status: str, started: float) -> None:
+    service, short = split_method(method)
+    metrics.grpc_server_calls.labels(service, short, status).inc()
+    metrics.grpc_server_latency.labels(service, short).observe(time.perf_counter() - started)
+
+
+def _observe_client(method: str, status: str, started: float) -> None:
+    """One attempt. A retried call counts once per attempt, as the network sees it."""
+    service, short = split_method(method)
+    metrics.grpc_client_calls.labels(service, short, status).inc()
+    metrics.grpc_client_latency.labels(service, short).observe(time.perf_counter() - started)
+
+
 def _method_name(method: str | bytes) -> str:
     return method.decode() if isinstance(method, bytes) else method
 
@@ -253,11 +286,13 @@ def channel(
     credentials: grpc.ChannelCredentials | None = None,
     strip_context: bool = False,
     options: Sequence[tuple[str, Any]] | None = None,
+    max_attempts: int = MAX_ATTEMPTS,
 ) -> grpc.aio.Channel:
     """A long-lived channel with keep-alive, round-robin and our interceptor.
 
     ``credentials`` is None only for local Compose and tests; shared and
-    production environments pass mTLS credentials.
+    production environments pass mTLS credentials. ``max_attempts=1`` is for a
+    caller with its own retry policy: two layers of retries multiply.
     """
     opts: list[tuple[str, Any]] = [
         ("grpc.keepalive_time_ms", 20_000),
@@ -270,7 +305,11 @@ def channel(
         ("grpc.max_send_message_length", 16 * 1024 * 1024),
         *(options or []),
     ]
-    interceptors = [ClientTelemetryInterceptor(events, target=target, strip_context=strip_context)]
+    interceptors = [
+        ClientTelemetryInterceptor(
+            events, target=target, strip_context=strip_context, max_attempts=max_attempts
+        )
+    ]
     if credentials is None:
         return grpc.aio.insecure_channel(target, options=opts, interceptors=interceptors)
     return grpc.aio.secure_channel(target, credentials, options=opts, interceptors=interceptors)

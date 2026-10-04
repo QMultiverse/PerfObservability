@@ -17,18 +17,20 @@ import json
 import logging
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from hub_telemetry.metrics import REGISTRY
 from prometheus_client import Counter as PromCounter
-from prometheus_client import Histogram
+from prometheus_client import Gauge, Histogram
 
 log = logging.getLogger(__name__)
 
 MAX_BUFFERED: Final = 200_000
+#: UETRs whose M1 is still waiting for an M2. Oldest are evicted beyond this.
+MAX_PENDING: Final = 200_000
 
 ess_calls = PromCounter(
     "ess_calls_total",
@@ -47,6 +49,53 @@ ess_errors = PromCounter(
     "ess_errors_total",
     "ESS call failures",
     ["method", "error"],
+    registry=REGISTRY,
+)
+
+# The simulator's own end-to-end view. M1 is the inbound message the ESS, as
+# FIN or SnF, delivers into the Hub; M2 is the outbound message the Hub hands
+# back to the emulated FIN or SnF. Measured here, outside the Hub, so it
+# includes the edge and every gRPC hop the Hub's own T0->T6 histogram cannot see.
+ess_m1_sent = PromCounter(
+    "ess_m1_sent_total",
+    "Inbound messages (M1) delivered to the Hub and accepted",
+    ["format", "flow"],
+    registry=REGISTRY,
+)
+ess_m2_received = PromCounter(
+    "ess_m2_received_total",
+    "Outbound messages (M2) the Hub sent to the emulated FIN or SnF",
+    ["format", "matched"],  # matched: an M1 was waiting for it
+    registry=REGISTRY,
+)
+ess_e2e_latency = Histogram(
+    "ess_e2e_latency_seconds",
+    "M1 sent to M2 received, measured by the simulator",
+    ["format", "flow"],  # format and flow of M1, the inbound side
+    # Up to 10 min: a payment on the retry ladder waits 30 s, then 5 min.
+    buckets=(
+        0.005,
+        0.010,
+        0.025,
+        0.050,
+        0.100,
+        0.250,
+        0.500,
+        1.0,
+        2.5,
+        5.0,
+        10.0,
+        30.0,
+        60.0,
+        120.0,
+        300.0,
+        600.0,
+    ),
+    registry=REGISTRY,
+)
+ess_m1_pending = Gauge(
+    "ess_m1_pending",
+    "M1 messages still waiting for their M2",
     registry=REGISTRY,
 )
 
@@ -83,6 +132,66 @@ class Recorder:
         self.calls_made = 0
         self.errors = 0
         self.dropped = 0
+        # UETR -> M1 sends still waiting for an M2, oldest first. A cover pair
+        # sends two M1s under one UETR and gets two M2s back.
+        self._pending: OrderedDict[str, deque[tuple[int, str, str]]] = OrderedDict()
+        ess_m1_pending.set_function(self.pending_count)
+
+    # ------------------------------------------------- end to end, M1 -> M2
+    def m1_sending(self, uetr: str, sent_ns: int, *, fmt: str, flow: str) -> None:
+        """Start the clock *before* the call: M2 can beat the receipt back."""
+        with self._lock:
+            waiting = self._pending.get(uetr)
+            if waiting is None:
+                waiting = deque()
+                self._pending[uetr] = waiting
+                if len(self._pending) > MAX_PENDING:
+                    self._pending.popitem(last=False)
+            waiting.append((sent_ns, fmt, flow))
+
+    def m1_done(self, uetr: str, sent_ns: int, *, fmt: str, flow: str, accepted: bool) -> None:
+        """Count an accepted M1, or withdraw the clock for one the Hub did not take.
+
+        Counted without looking at the pending entry: its M2 may already have
+        arrived and taken it.
+        """
+        if accepted:
+            ess_m1_sent.labels(fmt, flow).inc()
+            return
+        with self._lock:
+            waiting = self._pending.get(uetr)
+            if not waiting:
+                return
+            for entry in waiting:
+                if entry[0] == sent_ns:
+                    waiting.remove(entry)
+                    break
+            if not waiting:
+                del self._pending[uetr]
+
+    def m2_received(self, uetr: str, *, fmt: str) -> float | None:
+        """Stop the oldest clock for ``uetr``. Returns the latency in seconds.
+
+        A repeat M2 (the Hub retrying a send) finds nothing waiting: it is
+        counted as unmatched and adds no latency sample.
+        """
+        now = time.time_ns()
+        with self._lock:
+            waiting = self._pending.get(uetr)
+            if not waiting:
+                ess_m2_received.labels(fmt, "false").inc()
+                return None
+            sent_ns, m1_fmt, flow = waiting.popleft()
+            if not waiting:
+                del self._pending[uetr]
+        seconds = max(0, now - sent_ns) / 1e9
+        ess_m2_received.labels(fmt, "true").inc()
+        ess_e2e_latency.labels(m1_fmt, flow).observe(seconds)
+        return seconds
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return sum(len(waiting) for waiting in self._pending.values())
 
     def record(
         self,
@@ -201,6 +310,7 @@ class Recorder:
             self.calls_made = 0
             self.errors = 0
             self.dropped = 0
+            self._pending.clear()
 
 
 def _write_parquet(target: Path, records: list[dict[str, Any]]) -> bool:
