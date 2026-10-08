@@ -111,7 +111,7 @@ message Screening {
     NO_HIT = 1;
     HIT_PENDING = 2;
     BLOCK = 3;
-    RELEASED = 4;  // HIT_PENDING later released by NotifyFccDecision
+    RELEASED = 4;  // HIT_PENDING later released by NotifyComplianceDecision
   }
   Outcome outcome = 1;
   string case_id = 2;
@@ -164,9 +164,9 @@ enum PaymentState {
   PAYMENT_STATE_UNSPECIFIED = 0;
   RECEIVED = 1;        // durable on hub.in.*.raw, edge has replied
   PARSED = 2;          // canonical model built
-  SCREENED = 3;        // FCC returned NO_HIT, or the hit was released
-  HELD = 4;            // FCC returned HIT_PENDING; awaiting NotifyFccDecision
-  BLOCKED = 5;         // FCC BLOCK, or a held payment blocked by the analyst
+  SCREENED = 3;        // compliance returned NO_HIT, or the hit was released
+  HELD = 4;            // compliance returned HIT_PENDING; awaiting NotifyComplianceDecision
+  BLOCKED = 5;         // Compliance BLOCK, or a held payment blocked by the analyst
   AWAITING_COVER = 6;  // one leg present, waiting for its partner
   ROUTED = 7;
   SETTLED = 8;
@@ -259,8 +259,8 @@ message NetworkAckRecord {
   int64 received_ns = 9;
 }
 
-// hub.fcc.decision: analyst decisions for held payments.
-message FccDecisionRecord {
+// hub.compliance.decision: analyst decisions for held payments.
+message ComplianceDecisionRecord {
   MsgRef ref = 1;
   string case_id = 2;
   bool release = 3;

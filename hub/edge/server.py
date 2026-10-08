@@ -29,10 +29,10 @@ from hub_model.envelope import now_ns
 from hub_model.flows import flow_for, format_of, normalise_msg_type
 from hub_model.ids import is_valid_uetr
 from hub_model.proto import (
+    ComplianceDecision,
+    ComplianceDecisionRecord,
     DeliveryNotification,
     DeliveryReceipt,
-    FccDecision,
-    FccDecisionRecord,
     FinDelivery,
     MxDelivery,
     NetworkAck,
@@ -361,10 +361,10 @@ class HubNetworkEventsService(EdgeBase, pb.HubNetworkEventsServicer):
 
 
 class HubComplianceService(EdgeBase, pb.HubComplianceServicer):
-    """FCC returns an analyst decision for a payment parked in HELD."""
+    """The compliance service returns an analyst decision for a payment parked in HELD."""
 
-    async def NotifyFccDecision(  # noqa: N802 - gRPC method name
-        self, request: FccDecision, context: grpc.aio.ServicerContext
+    async def NotifyComplianceDecision(  # noqa: N802 - gRPC method name
+        self, request: ComplianceDecision, context: grpc.aio.ServicerContext
     ) -> Received:
         uetr = request.ref.uetr.lower()
         if not is_valid_uetr(uetr):
@@ -378,9 +378,9 @@ class HubComplianceService(EdgeBase, pb.HubComplianceServicer):
             run_id=self.run_id_from(context),
         )
         with payment_context(bag):
-            record = FccDecisionRecord(
+            record = ComplianceDecisionRecord(
                 case_id=request.case_id,
-                release=request.decision == FccDecision.RELEASE,
+                release=request.decision == ComplianceDecision.RELEASE,
                 reason=request.reason,
                 decided_ns=request.decided_ns or now_ns(),
                 received_ns=now_ns(),
@@ -388,12 +388,12 @@ class HubComplianceService(EdgeBase, pb.HubComplianceServicer):
             record.ref.CopyFrom(request.ref)
             record.ref.uetr = uetr
             self.producer.produce_now(
-                tp.FCC_DECISION,
+                tp.COMPLIANCE_DECISION,
                 uetr,
                 record.SerializeToString(),
                 {HDR_MSG_TYPE: request.ref.msg_type, HDR_FLOW: request.ref.flow},
             )
-            metrics.kafka_produced.labels(SERVICE_NAME, tp.FCC_DECISION).inc()
+            metrics.kafka_produced.labels(SERVICE_NAME, tp.COMPLIANCE_DECISION).inc()
             return Received(received=True)
 
 

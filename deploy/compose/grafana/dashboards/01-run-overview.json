@@ -118,7 +118,7 @@
     },
     {
       "type": "stat",
-      "title": "Held (awaiting FCC)",
+      "title": "Held (awaiting compliance)",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 4, "x": 16, "y": 5 },
       "fieldConfig": { "defaults": { "unit": "short" } },

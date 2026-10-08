@@ -51,7 +51,7 @@ StatusEvent = _pay.StatusEvent
 PaymentStateRecord = _pay.PaymentStateRecord
 RawInbound = _pay.RawInbound
 NetworkAckRecord = _pay.NetworkAckRecord
-FccDecisionRecord = _pay.FccDecisionRecord
+ComplianceDecisionRecord = _pay.ComplianceDecisionRecord
 FailedRecord = _pay.FailedRecord
 
 PaymentState = _pay.PaymentState
@@ -75,7 +75,7 @@ MxDelivery = _edge.MxDelivery
 DeliveryReceipt = _edge.DeliveryReceipt
 NetworkAck = _edge.NetworkAck
 DeliveryNotification = _edge.DeliveryNotification
-FccDecision = _edge.FccDecision
+ComplianceDecision = _edge.ComplianceDecision
 
 HubInboundServicer = _edge_grpc.HubInboundServicer
 HubInboundStub = _edge_grpc.HubInboundStub
@@ -99,11 +99,11 @@ FinGatewayServicer = _ext_grpc.FinGatewayServicer
 FinGatewayStub = _ext_grpc.FinGatewayStub
 SnfGatewayServicer = _ext_grpc.SnfGatewayServicer
 SnfGatewayStub = _ext_grpc.SnfGatewayStub
-FccScreeningServicer = _ext_grpc.FccScreeningServicer
-FccScreeningStub = _ext_grpc.FccScreeningStub
+ComplianceScreeningServicer = _ext_grpc.ComplianceScreeningServicer
+ComplianceScreeningStub = _ext_grpc.ComplianceScreeningStub
 add_FinGatewayServicer_to_server = _ext_grpc.add_FinGatewayServicer_to_server
 add_SnfGatewayServicer_to_server = _ext_grpc.add_SnfGatewayServicer_to_server
-add_FccScreeningServicer_to_server = _ext_grpc.add_FccScreeningServicer_to_server
+add_ComplianceScreeningServicer_to_server = _ext_grpc.add_ComplianceScreeningServicer_to_server
 
 # ------------------------------------------------------------- ess control
 Target = _ess.Target

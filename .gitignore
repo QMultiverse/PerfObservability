@@ -8,9 +8,13 @@ gen/
 .pytest_cache/
 *.egg-info/
 build/
+# ...except the observability guide's generator, which is source, not output.
+!docs/observability/build/
 dist/
 .coverage
 htmlcov/
 out/
 *.parquet
 .env
+# Office lock files (a document open in Word)
+~$*

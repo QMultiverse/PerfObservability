@@ -88,23 +88,23 @@ async def test_one_bad_message_does_not_block_its_partition(hub: Harness) -> Non
 
 
 # --------------------------------------------------------------- outages
-async def test_fcc_outage_retries_then_recovers(hub: Harness) -> None:
-    """FCC being down is transient: the record goes round the retry ladder."""
+async def test_compliance_outage_retries_then_recovers(hub: Harness) -> None:
+    """Compliance screening being down is transient: the record goes round the retry ladder."""
     from ess.profiles import Profile
 
-    hub.ess.profiles.set(Profile(target="FCC", outage_until_ns=-1))
+    hub.ess.profiles.set(Profile(target="COMPLIANCE", outage_until_ns=-1))
     delivery = hub.ess.sender.build(PACS_008, flow=FLOW_MX_SNF_PACS008)
     await hub.ess.sender.deliver(delivery)
 
     retry_topic = tp.PAY_CANONICAL + tp.RETRY_30S_SUFFIX
     await hub.settle(until=lambda: bool(hub.bus.records(retry_topic)), timeout_s=5.0)
     queued = hub.bus.records(retry_topic)
-    assert queued, "an unreachable FCC should retry, not dead-letter"
+    assert queued, "an unreachable compliance service should retry, not dead-letter"
 
     failed = FailedRecord()
     failed.ParseFromString(queued[0].value)
     assert failed.error_type == "RetryableError"
-    assert "FCC" in failed.error_message
+    assert "Compliance screening" in failed.error_message
     assert failed.attempt == 1
 
     # The failure is visible on the status stream as FAILED, not REJECTED.

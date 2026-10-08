@@ -1,4 +1,4 @@
-// Served by the FIN interface, the SnF interface and FCC. The Hub is the
+// Served by the FIN interface, the SnF interface and compliance screening. The Hub is the
 // caller. In every test environment all three are served by the ESS.
 //
 // Deadlines: Send* 500 ms, Screen 1 s. Retry only UNAVAILABLE and
@@ -50,8 +50,8 @@ message SendAccepted {
   string reason = 4;
 }
 
-// -------------------------------------------------------------------- FCC
-service FccScreening {
+// ------------------------------------------------------------- compliance
+service ComplianceScreening {
   rpc Screen(ScreenRequest) returns (ScreenResult);
 }
 

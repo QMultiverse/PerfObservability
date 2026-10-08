@@ -108,7 +108,7 @@ async def test_a_cover_type_sends_both_legs(hub: Harness) -> None:
 async def test_a_sanctions_share_is_screened_as_a_hit(hub: Harness) -> None:
     """Every payment names a watchlist party, so every one must pass through HELD.
 
-    They still complete: the functional FCC profile releases a hit after about
+    They still complete: the functional compliance profile releases a hit after about
     100 ms. What matters is that the hit happened at all.
     """
     report = await _run(hub, BatchSpec(count=10, sanctions_hit_rate=1.0, settle_timeout_s=25.0))

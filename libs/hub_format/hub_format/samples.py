@@ -51,7 +51,7 @@ CUSTOMERS: Final = (
     ("MERIDIAN EXPORTS BV", "31 HAVENKADE", "AMSTERDAM", "NL"),
 )
 
-# Party names the ESS FCC emulator treats as a sanctions hit. Entirely
+# Party names the ESS compliance emulator treats as a sanctions hit. Entirely
 # invented; they exist so a test can ask for a hit deterministically.
 SANCTIONS_NAMES: Final = ("REDLIST HOLDINGS SA", "BLOCKED VENTURES LLC")
 

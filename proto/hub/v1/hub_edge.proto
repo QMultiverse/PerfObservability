@@ -1,4 +1,4 @@
-// Served by the Payment Hub gRPC edge. Callers are FIN, SnF and FCC
+// Served by the Payment Hub gRPC edge. Callers are FIN, SnF and compliance screening
 // (the External Systems Simulator in every test environment).
 //
 // Metadata on every call: uetr, flow, traceparent, baggage (+ run-id in test).
@@ -77,11 +77,11 @@ message DeliveryNotification {
 
 // ------------------------------------------------------------- compliance
 service HubCompliance {
-  // FCC analyst decision on a screening hit; arrives minutes after the hit.
-  rpc NotifyFccDecision(FccDecision) returns (Received);
+  // Compliance analyst decision on a screening hit; arrives minutes after the hit.
+  rpc NotifyComplianceDecision(ComplianceDecision) returns (Received);
 }
 
-message FccDecision {
+message ComplianceDecision {
   enum Decision {
     DECISION_UNSPECIFIED = 0;
     RELEASE = 1;

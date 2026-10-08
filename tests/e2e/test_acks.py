@@ -92,7 +92,10 @@ async def test_a_refused_notification_is_not_retried() -> None:
 async def test_redelivery_stops_at_the_horizon(monkeypatch: pytest.MonkeyPatch) -> None:
     import ess.emulators as emulators
 
-    monkeypatch.setattr(emulators, "REDELIVERY_HORIZON_S", 2.0)
+    # Production-shaped backoff (seconds), against a horizon it soon passes.
+    monkeypatch.setattr(emulators, "REDELIVERY_FIRST_S", 2.0)
+    monkeypatch.setattr(emulators, "REDELIVERY_MAX_S", 60.0)
+    monkeypatch.setattr(emulators, "REDELIVERY_HORIZON_S", 5.0)
     call, calls = failing(99, grpc.StatusCode.UNAVAILABLE)
     outcome = await emulator().notify_reliably(
         call, method="HubNetworkEvents.NotifyAck", ref=REF, outcome="ACK"

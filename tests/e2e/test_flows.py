@@ -29,7 +29,7 @@ from tests.harness import Harness
 
 # ------------------------------------------------------------ screening
 async def test_screening_hit_is_held_then_released(hub: Harness) -> None:
-    """HIT_PENDING parks the payment; NotifyFccDecision resumes it."""
+    """HIT_PENDING parks the payment; NotifyComplianceDecision resumes it."""
     delivery = hub.ess.sender.build(PACS_008, flow=FLOW_MX_SNF_PACS008)
     hub.ess.overrides.set(delivery.uetr, Override(hit=True, release=True, decision_delay_s=0.05))
     await hub.ess.sender.deliver(delivery)

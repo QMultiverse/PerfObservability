@@ -37,6 +37,8 @@ dev = [
   "pytest-cov>=6.0",
   "ruff>=0.8",
   "types-protobuf>=5.28",
+  # Was installed locally but never declared; mypy --strict fails on a fresh clone without it.
+  "types-grpcio>=1.0",
 ]
 
 [project.scripts]
@@ -85,6 +87,8 @@ ignore = [
 "libs/hub_model/hub_model/ids.py" = ["N818"]
 "tests/*" = ["T20"]
 "scripts/*" = ["T20"]
+# Command-line tools for building the guide: printing is their output.
+"docs/observability/build/tools/*" = ["T20"]
 "ess/cli.py" = ["T20"]
 "hub/status_api/*" = ["T20"]
 

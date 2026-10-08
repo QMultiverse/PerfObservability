@@ -26,7 +26,7 @@ from hub_telemetry.otel import setup_tracing
 from .batch import BatchRunner
 from .cases import CaseRunner, StatusProbe
 from .control import EssControl
-from .emulators import FccEmulator, FinEmulator, Overrides, SnfEmulator
+from .emulators import ComplianceEmulator, FinEmulator, Overrides, SnfEmulator
 from .profiles import ProfileStore
 from .recorder import Recorder
 from .sender import InboundSender
@@ -86,7 +86,7 @@ class Ess:
     events: Events
     fin: FinEmulator
     snf: SnfEmulator
-    fcc: FccEmulator
+    compliance: ComplianceEmulator
     sender: InboundSender
     runner: CaseRunner
     batch: BatchRunner
@@ -105,7 +105,7 @@ class Ess:
         )
         pb.add_FinGatewayServicer_to_server(self.fin, server)
         pb.add_SnfGatewayServicer_to_server(self.snf, server)
-        pb.add_FccScreeningServicer_to_server(self.fcc, server)
+        pb.add_ComplianceScreeningServicer_to_server(self.compliance, server)
         pb.add_EssControlServicer_to_server(self.control, server)
 
         address = f"[::]:{self.settings.port}"
@@ -113,7 +113,7 @@ class Ess:
         await server.start()
         self.server = server
         log.info(
-            "ESS serving FIN, SnF, FCC and EssControl on port %d in %s mode (hub: %s)",
+            "ESS serving FIN, SnF, compliance and EssControl on port %d in %s mode (hub: %s)",
             bound,
             self.settings.mode,
             self.settings.hub_target,
@@ -125,12 +125,12 @@ class Ess:
             await self.server.stop(grace)
             self.server = None
         await asyncio.gather(
-            self.fin.close(), self.snf.close(), self.fcc.close(), self.sender.close()
+            self.fin.close(), self.snf.close(), self.compliance.close(), self.sender.close()
         )
 
     async def drain(self) -> None:
         """Wait for every scheduled callback. Used by cases and tests."""
-        await asyncio.gather(self.fin.drain(), self.snf.drain(), self.fcc.drain())
+        await asyncio.gather(self.fin.drain(), self.snf.drain(), self.compliance.drain())
 
 
 def build(settings: EssSettings, *, events: Events | None = None) -> Ess:
@@ -151,7 +151,7 @@ def build(settings: EssSettings, *, events: Events | None = None) -> Ess:
     }
     fin = FinEmulator(**shared)  # type: ignore[arg-type]
     snf = SnfEmulator(**shared)  # type: ignore[arg-type]
-    fcc = FccEmulator(**shared)  # type: ignore[arg-type]
+    compliance = ComplianceEmulator(**shared)  # type: ignore[arg-type]
 
     sender = InboundSender(settings.hub_target, bound_events, recorder, run_id=settings.run_id)
     probe = StatusProbe(settings.status_api_url) if settings.status_api_url else None
@@ -167,7 +167,7 @@ def build(settings: EssSettings, *, events: Events | None = None) -> Ess:
         events=bound_events,
         fin=fin,
         snf=snf,
-        fcc=fcc,
+        compliance=compliance,
         sender=sender,
         runner=runner,
         batch=batch,

@@ -135,7 +135,7 @@ async def test_traceparent_travels_with_the_baggage(hub: Harness) -> None:
 
 
 def test_baggage_is_stripped_for_the_real_networks() -> None:
-    """The real FIN / SnF / FCC must never see our internal context."""
+    """The real FIN / SnF / compliance service must never see our internal context."""
     headers = {
         "baggage": "payment.uetr=x,payment.format=MX",
         "traceparent": "00-abc-def-01",
@@ -268,7 +268,7 @@ async def test_errors_are_always_visible(hub: Harness) -> None:
     from ess.profiles import Profile
 
     with CapturedLogs() as logs:
-        hub.ess.profiles.set(Profile(target="FCC", outage_until_ns=-1))
+        hub.ess.profiles.set(Profile(target="COMPLIANCE", outage_until_ns=-1))
         delivery = hub.ess.sender.build(PACS_008, flow=FLOW_MX_SNF_PACS008)
         await hub.ess.sender.deliver(delivery)
         await hub.settle(until=lambda: PAYMENT_ERROR in logs.actions(delivery.uetr), timeout_s=5.0)

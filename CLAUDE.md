@@ -4,24 +4,25 @@ Context for Claude Code. Read this first, then the design docs:
 
 - `docs/platform-design.md`: the Payment Hub, its gRPC contract, Kafka design, the External Systems Simulator (ESS) and payment tracking with ELK. **This is the source of truth for the platform.**
 - `docs/performance-testing.md`: the performance testing infrastructure (perfctl, paygen, SLO gate, observability). This comes later; the platform comes first.
+- `docs/known-issues.md`: open problems in the Hub, the ESS, the tests and the local environment. Remove an entry in the change that fixes it.
 
 If code and docs disagree, stop and ask. When a design decision changes, update the relevant doc in the same change.
 
 ## What we are building
 
-A **Payment Hub** that ingests, validates, screens, routes and settles cross-border payments arriving as SWIFT **MT** over FIN (MT103, MT202, MT202 COV) or **MX** / ISO 20022 over SWIFTNet Store-and-Forward (pacs.008, pacs.009 incl. COV, pacs.002, pacs.004, camt.056 / camt.029). It also includes the **External Systems Simulator (ESS)**, which plays FIN, SnF and FCC (financial crime compliance) so the Hub can be developed and tested.
+A **Payment Hub** that ingests, validates, screens, routes and settles cross-border payments arriving as SWIFT **MT** over FIN (MT103, MT202, MT202 COV) or **MX** / ISO 20022 over SWIFTNet Store-and-Forward (pacs.008, pacs.009 incl. COV, pacs.002, pacs.004, camt.056 / camt.029). It also includes the **External Systems Simulator (ESS)**, which plays FIN, SnF and compliance screening so the Hub can be developed and tested.
 
 ## Names and conventions (use these exactly)
 
 | Thing | Name |
 | --- | --- |
 | System under test | Payment Hub ("the Hub") |
-| Mock of FIN, SnF and FCC | External Systems Simulator (ESS) |
-| gRPC services the Hub serves | `HubInbound` (`DeliverFin`, `DeliverMx`), `HubNetworkEvents` (`NotifyAck`, `NotifyDeliveryNotification`), `HubCompliance` (`NotifyFccDecision`) |
-| gRPC services the Hub calls | `FinGateway.SendMt`, `SnfGateway.SendMx`, `FccScreening.Screen` |
+| Mock of FIN, SnF and compliance screening | External Systems Simulator (ESS) |
+| gRPC services the Hub serves | `HubInbound` (`DeliverFin`, `DeliverMx`), `HubNetworkEvents` (`NotifyAck`, `NotifyDeliveryNotification`), `HubCompliance` (`NotifyComplianceDecision`) |
+| gRPC services the Hub calls | `FinGateway.SendMt`, `SnfGateway.SendMx`, `ComplianceScreening.Screen` |
 | ESS control API | `EssControl` (`SetProfile`, `RunCase`, `ListCases`, `SendInbound`, `RunBatch`, `GetCounters`, `Reset`) and the `ess` CLI |
 | Proto packages | `hub.v1` (`proto/hub/v1/hub_edge.proto`), `ext.v1` (`proto/ext/v1/networks.proto`), `ess.v1` (`proto/ess/v1/control.proto`) |
-| Kafka topics | `hub.in.fin.raw`, `hub.in.mx.raw`, `hub.pay.canonical`, `hub.pay.screened`, `hub.pay.routed`, `hub.out.fin`, `hub.out.mx`, `hub.net.ack`, `hub.fcc.decision`, `hub.pay.status`, `hub.pay.state` (compacted), plus `<topic>.retry.30s`, `.retry.5m`, `.dlq` |
+| Kafka topics | `hub.in.fin.raw`, `hub.in.mx.raw`, `hub.pay.canonical`, `hub.pay.screened`, `hub.pay.routed`, `hub.out.fin`, `hub.out.mx`, `hub.net.ack`, `hub.compliance.decision`, `hub.pay.status`, `hub.pay.state` (compacted), plus `<topic>.retry.30s`, `.retry.5m`, `.dlq` |
 | Consumer groups | `cg-fin-parser`, `cg-mx-parser`, `cg-screening`, `cg-routing`, `cg-settlement`, `cg-dispatch-fin`, `cg-dispatch-mx`, `cg-ack-matcher`, `cg-status-api`, `cg-db-sink`, `cg-retry` (drains the retry topics) |
 | Correlation key | UETR (UUID v4). It is the Kafka key on every topic and travels in gRPC metadata. Cover pairs share one UETR. |
 | Flow IDs | `MT_FIN_103`, `MT_FIN_103_202COV`, `MT_TO_MX_103`, `MX_SNF_PACS008`, `MX_SNF_PACS009`, `MX_SNF_PACS009COV_PAIR` |
@@ -35,15 +36,15 @@ A **Payment Hub** that ingests, validates, screens, routes and settles cross-bor
 3. **MT and MX stay separate** until `hub.pay.canonical` (separate RPCs, raw topics and parsers), then split again at `hub.out.fin` / `hub.out.mx`. Records on shared topics carry a `format` header (MT / MX).
 4. **Each processor reads, processes and writes in one Kafka transaction** (read_committed, transactional producer, offsets committed in the transaction). Calls outside Kafka (`Screen`, `SendMt`, `SendMx`) are not transactional, so every receiver de-duplicates on (UETR, message type, direction).
 5. **Claim-check:** raw MT/MX bytes travel only on `*.raw` topics. Later topics carry the canonical model plus a pointer (topic, partition, offset).
-6. **Every gRPC call sets a deadline** (proposed: `Deliver*` 200 ms, `Send*` 500 ms, `Screen` 1 s). Retry only `UNAVAILABLE` / `DEADLINE_EXCEEDED`, with exponential backoff and jitter, at most 3 times.
+6. **Every gRPC call sets a deadline** (proposed: `Deliver*` 200 ms, `Send*` 500 ms, `Screen` 1 s). Retry only `UNAVAILABLE` / `DEADLINE_EXCEEDED`, with exponential backoff and jitter, at most 3 times. `HUB_DEADLINE_SCALE` multiplies every deadline; it is 1 (unset) in every deployment and exists only for the test suite.
 7. **Failures go to retry topics, then the DLQ.** One bad message must never block a partition.
-8. **Screening hits** (`HIT_PENDING`) park the payment in HELD. `NotifyFccDecision` → `hub.fcc.decision` → processing resumes.
+8. **Screening hits** (`HIT_PENDING`) park the payment in HELD. `NotifyComplianceDecision` → `hub.compliance.decision` → processing resumes.
 9. **Cover pairs** are matched in a state store (rebuilt from `hub.pay.state`) and complete together. **Decided:** the matching stage is **screening** (`hub/screening/processor.py`), because both legs must clear compliance before either is released, and that keeps `AWAITING_COVER` next to `HELD` in one store. The ACK matcher matches again on the way out, so the pair is COMPLETED only once both ACKs arrive. The store is in-memory with the `hub.pay.state` rebuild path built in (`hub/common/state_store.py`); a Valkey-backed implementation can replace it behind the same interface.
 
 ## Payment tracking (ELK) and baggage
 
 - OpenTelemetry **Baggage** is set once at the Hub edge and carried as the W3C `baggage` header, in gRPC metadata and in Kafka record headers, alongside `traceparent`.
-- Baggage keys: `payment.uetr`, `payment.format`, `payment.msg_type`, `payment.flow`, `payment.biz_msg_id`, `payment.trace`, and `run.id` (test only). Keep it under 512 bytes. **Never** put names, accounts or amounts in baggage. Strip it on calls to the real FIN / SnF / FCC.
+- Baggage keys: `payment.uetr`, `payment.format`, `payment.msg_type`, `payment.flow`, `payment.biz_msg_id`, `payment.trace`, and `run.id` (test only). Keep it under 512 bytes. **Never** put names, accounts or amounts in baggage. Strip it on calls to the real FIN / SnF / compliance service.
 - `hub-telemetry` provides gRPC server and client interceptors, Kafka produce/consume wrappers, a logging filter that copies baggage into every log line, a baggage span processor and asynchronous (queue) logging. Events are one JSON line in ECS format, with `event.action` one of `grpc.server.recv|reply`, `grpc.client.send|reply`, `kafka.produce`, `kafka.consume`, `payment.state`, `payment.error`.
 - **Tracking levels:** `full` / `standard` / `minimal` / `errors` / `none`. The mode is set by `HUB_TRACKING_MODE`:
   - `functional` and `ci` → `full` for every payment.
@@ -60,10 +61,18 @@ A **Payment Hub** that ingests, validates, screens, routes and settles cross-bor
 - **CLIs:** Typer, for `ess` and later `perfctl` / `paygen`.
 - **Message handling:** `lxml` + `xmlschema` for MX (ISO 20022 XSDs; CBPR+ schemas come from Swift MyStandards). The MT parser is in-house.
 
-## Local environment (Windows, 16 GB RAM)
+## Local environment (Windows, macOS or Linux; 16 GB RAM)
 
-- **Setup:** Docker Desktop on WSL2. PyCharm, with the interpreter inside WSL2 or Docker. For the Claude Code plugin with WSL, set the Claude command to `wsl -d Ubuntu -- bash -lic "claude"`.
-- **`%UserProfile%\.wslconfig`:** `memory=10GB`, `swap=4GB`, plus `[experimental] autoMemoryReclaim=gradual`. Inside WSL2, also set `vm.max_map_count=262144`.
+The stack runs the same on all three. Everything platform-specific is in this section and in `python scripts/dev.py doctor`, which checks a machine and says what to fix.
+
+- **Supported runtimes:** Docker Desktop (Windows on WSL 2, macOS on Intel or Apple Silicon) and Docker Engine with the Compose plugin (Linux). Every image is published for `amd64` and `arm64`. Podman, Colima and rootless Docker are untested: Filebeat reads the Docker socket and the containers' log files.
+- **Memory:** about 10 GB for Docker with the full stack. Windows: `%UserProfile%\.wslconfig` with `memory=10GB`, `swap=4GB`, plus `[experimental] autoMemoryReclaim=gradual`. macOS: Docker Desktop, Settings, Resources. Linux: the host's own memory.
+- **Elasticsearch:** needs `vm.max_map_count=262144`. Docker Desktop sets it; on Linux, `sudo sysctl -w vm.max_map_count=262144` (persist it in `/etc/sysctl.d/`).
+- **Host ports** are fixed by default and each can be changed in `.env` (`GRAFANA_HOST_PORT` and the like; see `.env.example`).
+- **Line endings** are LF everywhere (`.gitattributes`), because config files are mounted into Linux containers. Only `*.ps1` is CRLF.
+- **Tasks** go through `python scripts/dev.py <task>` (standard library only, so it runs on a fresh clone): `install`, `check`, `doctor`, `up`, `ready`, `trace` and the rest. No task may depend on one shell; anything Windows-only (`docs/observability/build/tools/update_toc.ps1` drives Word) must degrade to a message elsewhere.
+- **Sleep:** a host that sleeps freezes Docker's VM, and Kafka then drops the Hub's consumers. A stage that holds no partitions for `HUB_REJOIN_AFTER_S` (60 s) rejoins its group by itself and shows on `hub_stage_stalled` meanwhile; the container health check fails while any stage is stalled. Still, turn sleep off during test runs.
+- **PyCharm on Windows:** interpreter inside WSL 2 or Docker. For the Claude Code plugin with WSL, set the Claude command to `wsl -d Ubuntu -- bash -lic "claude"`.
 - **Memory limits:**
 
   | Component | Limit | Notes |
@@ -75,14 +84,15 @@ A **Payment Hub** that ingests, validates, screens, routes and settles cross-bor
   | Hub services + ESS | 2.5 GB | One replica each |
 
 - **Throwaway data:** the ELK compose stack uses **no named volumes**, so `docker compose down` wipes all logs, and `docker compose stop` keeps them. The index lifecycle policy rolls over at 2 GB and deletes after 1 day.
-- **Load:** keep local loads at or below ~50 TPS. Peak performance runs belong in a shared environment.
+- **Load:** a 16 GB laptop running the full stack sustains about 3 payments a second (measured in the fault-injection runs); `ess batch` itself tops out near 10. Peak performance runs belong in a shared environment.
 
 ## Repo layout
 
 ```
 payment-hub/
 ├── CLAUDE.md
-├── docs/                     # platform-design.md, performance-testing.md
+├── .github/workflows/        # CI: checks on Linux, macOS and Windows; a stack smoke test on Linux
+├── docs/                     # platform-design.md, performance-testing.md, known-issues.md, observability/ (the guide and its generator)
 ├── proto/                    # hub/v1, ext/v1, ess/v1 (the contract; versioned)
 ├── libs/hub_telemetry/       # interceptors, Kafka wrappers, baggage, ECS logging, tracking levels
 ├── libs/hub_model/           # canonical payment model, topic names, flow IDs, identifiers
@@ -96,10 +106,10 @@ payment-hub/
 │   └── common/              #   config, the transactional loop, state store, retry consumer
 ├── ess/                      # External Systems Simulator: emulators, sender, scenario engine, recorder, EssControl, `ess` CLI
 ├── samples/                  # sample pacs.008 / pacs.009 / MT103 / MT202 messages (synthetic data only)
-├── compose.yaml              # the single local stack; profiles solo | stages | elk
+├── compose.yaml              # the single local stack; profiles solo | stages | obs | elk
 ├── deploy/compose/           # the config compose.yaml mounts (filebeat, elasticsearch)
 ├── deploy/helm/              # later
-├── scripts/                  # gen_proto, create_topics, make_samples, dev.ps1
+├── scripts/                  # dev.py (every common task), gen_proto, create_topics, make_samples
 ├── gen/                      # generated gRPC stubs; not committed
 └── tests/                    # unit/, contract/ (proto contract, both sides), e2e/ (via ESS)
 ```
@@ -150,6 +160,8 @@ the local ceiling, and paygen owns real load.
 Steps 1 to 4 of the build order are implemented and tested end to end
 (`pytest tests/e2e`). Step 5, the performance framework, is not started.
 
+**Known issue:** the full suite occasionally hangs instead of finishing (roughly one run in three to five on a 16 GB Windows laptop under memory pressure; cause not yet found). Two signatures: a thread join during pytest teardown, and an event loop waiting forever. Pinning `grpc.aio.init_grpc_aio()` was tried and did not help. If a run hangs, stop it and run it again. This and the other open problems are in `docs/known-issues.md`.
+
 Decisions the implementation had to make, each recorded next to the code:
 
 | Decision | Where | Why |
@@ -162,13 +174,14 @@ Decisions the implementation had to make, each recorded next to the code:
 | XSD validation is **opt-in** | `HUB_MX_SCHEMA_DIR`, `hub_format.mx.XsdValidator` | CBPR+ schemas are licensed through Swift MyStandards and cannot be committed. Structural validation always runs. |
 | The ESS recorder writes **JSON Lines** | `ess/recorder.py` | The doc asks for Parquet; `pyarrow` is not a dependency. Parquet is written when `pyarrow` happens to be importable. |
 | Tests run against an **in-process Kafka** | `hub_telemetry.memory_bus`, `tests/harness.py` | The whole suite runs in seconds with no broker. Service code only ever sees the `Bus` interface; `KafkaBus` is the real one. |
+| The test suite **scales its gRPC deadlines** by 10 | `HUB_DEADLINE_SCALE` in `hub_telemetry/grpc_telemetry.py`, set in `tests/__init__.py` | The tests make real gRPC calls over loopback; on a loaded laptop or a shared CI runner a 200 ms deadline is missed for reasons unrelated to the code. A contract test checks the unscaled values in a fresh interpreter. |
 | A payment's state **never moves backwards**, except out of FAILED | `supersedes` in `hub_model/envelope.py`; the guards in `hub/status_api` and `hub/db_sink` (same rule in SQL) | A network ACK can beat the dispatcher's own transaction commit, so COMPLETED legitimately arrives before DISPATCHED on `hub.pay.status`. Both sinks rank the state; timings still accumulate from every event. FAILED means "on the retry ladder", not terminal, so moving into or out of it goes by event time: a payment retried and then dispatched must not stay FAILED (found by perf scenario 3). |
 | The ESS **redelivers** network notifications; the Hub **reports** a missing ACK | `notify_reliably` in `ess/emulators.py`; `ACK_OVERDUE_S` and `hub_awaiting_ack` in `hub/ack_matcher/processor.py` | A real FIN / SnF interface keeps an undelivered ACK queued. Giving up after one call left payments DISPATCHED forever, unnoticed (perf scenarios 1, 3, 4). Redelivery is **bounded**: one call per round (the channel does not retry underneath), backoff 2 s to 60 s with jitter, at most 5 redeliveries a second per emulator, for up to 10 minutes; the Hub de-duplicates repeats. Unbounded, it caused a retry storm (perf scenario 2). What the Hub *does* about an overdue ACK is a `TODO(business-rules)`. |
 
 ## Open questions (don't guess — ask or leave a clear TODO)
 
 - **Completion:** what counts as completed — outbound handoff, network ACK, or final pacs.002? (Implemented as the network ACK; see `COMPLETION_RULE`.)
-- **FCC:** is the real FCC call synchronous on the payment path, or event-based?
+- **Compliance screening:** is the real compliance screening call synchronous on the payment path, or event-based?
 - **Volumes:** what is the MT vs MX split and peak TPS? The SLO numbers in the docs are placeholders.
 - **Production inbound path:** a gRPC edge, or an MQ / Alliance Access adapter?
 - **Tooling:** Confluent Schema Registry or Apicurio? And the database schema for the payment store.
@@ -181,4 +194,4 @@ Decisions the implementation had to make, each recorded next to the code:
 - Never use real customer data. Samples and generated data must be synthetic; IBANs must pass checksum via `schwifty`.
 - Regenerate gRPC stubs from `proto/`; never hand-edit generated code.
 - Don't add paid or restrictively licensed dependencies without asking (see `docs/performance-testing.md` §4.1).
-- Explain Windows / WSL2 specifics when giving commands (PowerShell vs WSL bash).
+- Keep it working on Windows, macOS and Linux: give commands that run in any shell (prefer `python scripts/dev.py ...`), and say so when something is specific to one platform. CI runs the checks on all three.

@@ -1,4 +1,4 @@
-"""Behaviour profiles: how the emulated FIN, SnF and FCC respond.
+"""Behaviour profiles: how the emulated FIN, SnF and compliance screening respond.
 
 A profile is what turns one image into three modes. Functional runs use fixed,
 near-zero latency and no faults; CI adds fault injection; performance draws
@@ -27,7 +27,7 @@ LOGNORMAL: Final = "lognormal"
 TARGET_NAMES: Final = {
     int(Target.FIN): "FIN",
     int(Target.SNF): "SNF",
-    int(Target.FCC): "FCC",
+    int(Target.COMPLIANCE): "COMPLIANCE",
 }
 
 
@@ -107,7 +107,7 @@ class Profile:
 FUNCTIONAL_DEFAULTS: Final = {
     "FIN": Profile("FIN", Latency(FIXED, 1.0), Latency(FIXED, 5.0)),
     "SNF": Profile("SNF", Latency(FIXED, 1.0), Latency(FIXED, 5.0), delivery_notifications=True),
-    "FCC": Profile("FCC", Latency(FIXED, 2.0), Latency(FIXED, 100.0)),
+    "COMPLIANCE": Profile("COMPLIANCE", Latency(FIXED, 2.0), Latency(FIXED, 100.0)),
 }
 
 #: Performance mode: latency drawn from a distribution, with the small hit and
@@ -124,8 +124,8 @@ PERFORMANCE_DEFAULTS: Final = {
         nak_rate=0.001,
         delivery_notifications=True,
     ),
-    "FCC": Profile(
-        "FCC",
+    "COMPLIANCE": Profile(
+        "COMPLIANCE",
         Latency(LOGNORMAL, 25.0, 300.0),
         Latency(FIXED, 300_000.0),  # analyst decisions take minutes
         hit_rate=0.02,

@@ -112,12 +112,14 @@ async def test_counters_are_reported_per_run(hub: Harness) -> None:
 
 async def test_reset_clears_counters_and_profiles(hub: Harness) -> None:
     await hub.ess.control.SendInbound(pb.SendInboundRequest(msg_type="pacs.008"), None)
-    await hub.ess.control.SetProfile(pb.BehaviourProfile(target=pb.Target.FCC, hit_rate=0.5), None)
-    assert hub.ess.profiles.get("FCC").hit_rate == 0.5
+    await hub.ess.control.SetProfile(
+        pb.BehaviourProfile(target=pb.Target.COMPLIANCE, hit_rate=0.5), None
+    )
+    assert hub.ess.profiles.get("COMPLIANCE").hit_rate == 0.5
 
     applied = await hub.ess.control.Reset(pb.ResetRequest(), None)
     assert applied.applied
-    assert hub.ess.profiles.get("FCC").hit_rate == 0.0
+    assert hub.ess.profiles.get("COMPLIANCE").hit_rate == 0.0
     counters = await hub.ess.control.GetCounters(pb.CounterRequest(), None)
     assert counters.calls_made == 0
 
@@ -140,7 +142,7 @@ async def test_set_profile_changes_behaviour_at_runtime(hub: Harness) -> None:
 
 async def test_set_profile_for_all_targets(hub: Harness) -> None:
     await hub.ess.control.SetProfile(pb.BehaviourProfile(target=pb.Target.ALL, nak_rate=0.1), None)
-    for target in ("FIN", "SNF", "FCC"):
+    for target in ("FIN", "SNF", "COMPLIANCE"):
         assert hub.ess.profiles.get(target).nak_rate == 0.1
 
 
@@ -158,7 +160,7 @@ async def test_an_outage_is_time_limited(hub: Harness) -> None:
 # -------------------------------------------------------------- profiles
 def test_functional_defaults_are_deterministic_and_fault_free() -> None:
     store = ProfileStore("functional")
-    for target in ("FIN", "SNF", "FCC"):
+    for target in ("FIN", "SNF", "COMPLIANCE"):
         profile = store.get(target)
         assert profile.accept_latency.kind == FIXED
         assert profile.nak_rate == 0.0
@@ -169,8 +171,8 @@ def test_functional_defaults_are_deterministic_and_fault_free() -> None:
 def test_performance_defaults_draw_from_a_distribution() -> None:
     store = ProfileStore("performance")
     assert store.get("FIN").accept_latency.kind == LOGNORMAL
-    assert store.get("FCC").hit_rate > 0
-    assert store.get("FCC").ack_latency.p50_ms > 1000, "analyst decisions take minutes"
+    assert store.get("COMPLIANCE").hit_rate > 0
+    assert store.get("COMPLIANCE").ack_latency.p50_ms > 1000, "analyst decisions take minutes"
 
 
 def test_fixed_latency_is_exactly_its_p50() -> None:
@@ -200,10 +202,10 @@ def test_an_indefinite_outage_lasts_until_cleared() -> None:
 
 def test_profiles_reset_to_their_mode_defaults() -> None:
     store = ProfileStore("functional")
-    store.set(Profile(target="FCC", hit_rate=0.9, outage_until_ns=-1))
+    store.set(Profile(target="COMPLIANCE", hit_rate=0.9, outage_until_ns=-1))
     store.reset()
-    assert store.get("FCC").hit_rate == 0.0
-    assert not store.get("FCC").outage()
+    assert store.get("COMPLIANCE").hit_rate == 0.0
+    assert not store.get("COMPLIANCE").outage()
 
 
 # -------------------------------------------------------------- recorder
@@ -266,6 +268,13 @@ async def test_the_recorder_sees_both_sides_of_a_payment(hub: Harness) -> None:
     delivery = hub.ess.sender.build("pacs.008")
     await hub.ess.sender.deliver(delivery)
     await hub.run_until_state(delivery.uetr, "COMPLETED")
+
+    # The Hub can mark the payment COMPLETED a moment before the emulator's own
+    # NotifyAck call returns and is recorded, so wait for the row, not the state.
+    def recorded() -> bool:
+        return "HubNetworkEvents.NotifyAck" in hub.ess.recorder.counters()["by_method"]
+
+    assert await hub.settle(until=recorded, timeout_s=10.0)
 
     methods = hub.ess.recorder.counters()["by_method"]
     assert methods["HubInbound.DeliverMx"] == 1  # made by the sender

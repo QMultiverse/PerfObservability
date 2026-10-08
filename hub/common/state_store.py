@@ -5,7 +5,7 @@ Holds three things (design doc section 7):
 * which stages a UETR has already completed — the idempotency check that makes
   ``Screen``, ``SendMt`` and ``SendMx`` safe to repeat after a crash;
 * cover legs waiting for their partner;
-* payments HELD for an FCC decision.
+* payments HELD for a compliance decision.
 
 It is rebuilt from the compacted ``hub.pay.state`` topic on restart, so a
 replica that loses its store recovers without replaying the whole pipeline.

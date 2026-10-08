@@ -58,7 +58,7 @@ class RunningHub:
             external=ExternalSettings(
                 fin_target=f"localhost:{self.ess_port}",
                 snf_target=f"localhost:{self.ess_port}",
-                fcc_target=f"localhost:{self.ess_port}",
+                compliance_target=f"localhost:{self.ess_port}",
             ),
             pod_id="test",
         )

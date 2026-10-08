@@ -1567,7 +1567,7 @@
     {
       "type": "timeseries",
       "title": "gRPC client calls (outbound)",
-      "description": "Calls made, per attempt: a retried call counts once per attempt, as the network sees it. Hub → FIN / SnF / FCC, and ESS → Hub.",
+      "description": "Calls made, per attempt: a retried call counts once per attempt, as the network sees it. Hub → FIN / SnF / compliance service, and ESS → Hub.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1697,7 +1697,7 @@
     {
       "type": "timeseries",
       "title": "gRPC server calls (inbound)",
-      "description": "Calls served: HubInbound / HubNetworkEvents / HubCompliance on the Hub, FinGateway / SnfGateway / FccScreening on the ESS. The ESS control API (EssControl) is excluded.",
+      "description": "Calls served: HubInbound / HubNetworkEvents / HubCompliance on the Hub, FinGateway / SnfGateway / ComplianceScreening on the ESS. The ESS control API (EssControl) is excluded.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

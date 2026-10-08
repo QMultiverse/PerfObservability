@@ -55,7 +55,7 @@ RETRYABLE_TOPICS: Final = (
     tp.OUT_FIN,
     tp.OUT_MX,
     tp.NET_ACK,
-    tp.FCC_DECISION,
+    tp.COMPLIANCE_DECISION,
 )
 
 

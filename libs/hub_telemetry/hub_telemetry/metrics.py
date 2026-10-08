@@ -169,7 +169,7 @@ payment_end_to_end = Histogram(
 )
 held_payments = Gauge(
     "hub_held_payments",
-    "Payments parked awaiting an FCC decision",
+    "Payments parked awaiting a compliance decision",
     ["service"],
     registry=REGISTRY,
 )
@@ -253,6 +253,19 @@ kafka_rebalances = Counter(
     "hub_kafka_rebalances_total",
     "Partition assignment changes seen by a consumer",
     ["group", "event"],  # assign | revoke | lost
+    registry=REGISTRY,
+)
+stage_stalled = Gauge(
+    "hub_stage_stalled",
+    "1 while a stage has held no partitions for longer than its rejoin timeout: "
+    "it is running but doing no work. The container health check fails on it",
+    ["service"],
+    registry=REGISTRY,
+)
+kafka_consumer_rejoins = Counter(
+    "hub_kafka_consumer_rejoins_total",
+    "Times a stage replaced its consumer because it held no partitions",
+    ["service"],
     registry=REGISTRY,
 )
 kafka_assigned_partitions = Gauge(

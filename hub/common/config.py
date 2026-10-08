@@ -47,6 +47,10 @@ class KafkaSettings:
     replication: int = 3
     batch_size: int = 500
     poll_timeout_s: float = 0.05
+    #: A stage that has held no partitions for this long drops its consumer and
+    #: joins its group again. 0 turns it off, which a deployment with more
+    #: replicas than partitions needs: there an idle replica is normal.
+    rejoin_after_s: float = 60.0
     create_topics: bool = False
     security: dict[str, Any] = field(default_factory=dict)
 
@@ -73,6 +77,7 @@ class KafkaSettings:
             replication=_env_int("KAFKA_REPLICATION", 3),
             batch_size=_env_int("HUB_BATCH_SIZE", 500),
             poll_timeout_s=_env_float("HUB_POLL_TIMEOUT_S", 0.05),
+            rejoin_after_s=_env_float("HUB_REJOIN_AFTER_S", 60.0),
             create_topics=_env_bool("KAFKA_CREATE_TOPICS", False),
             security=security,
         )
@@ -80,7 +85,7 @@ class KafkaSettings:
 
 @dataclass(slots=True)
 class ExternalSettings:
-    """Where the FIN, SnF and FCC gateways live.
+    """Where the FIN, SnF and compliance screening gateways live.
 
     In every test environment all three point at the ESS. Switching to the real
     systems is these three addresses plus ``real_networks=True``, which makes
@@ -89,7 +94,7 @@ class ExternalSettings:
 
     fin_target: str = "localhost:9101"
     snf_target: str = "localhost:9101"
-    fcc_target: str = "localhost:9101"
+    compliance_target: str = "localhost:9101"
     real_networks: bool = False
 
     @classmethod
@@ -98,7 +103,7 @@ class ExternalSettings:
         return cls(
             fin_target=_env("FIN_TARGET", ess),
             snf_target=_env("SNF_TARGET", ess),
-            fcc_target=_env("FCC_TARGET", ess),
+            compliance_target=_env("COMPLIANCE_TARGET", ess),
             real_networks=_env_bool("HUB_REAL_NETWORKS", False),
         )
 

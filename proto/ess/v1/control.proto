@@ -1,5 +1,5 @@
 // Served by the External Systems Simulator. Drives the behaviour of the FIN,
-// SnF and FCC emulators at runtime, runs named test cases and reads counters.
+// SnF and compliance emulators at runtime, runs named test cases and reads counters.
 //
 // The ESS is part of the Payment Hub deliverable and is versioned with the
 // rest of the contract, so the Hub and the ESS cannot drift apart.
@@ -26,7 +26,7 @@ enum Target {
   TARGET_UNSPECIFIED = 0;
   FIN = 1;
   SNF = 2;
-  FCC = 3;
+  COMPLIANCE = 3;
   ALL = 4;
 }
 
@@ -41,7 +41,7 @@ message LatencyDist {
 message BehaviourProfile {
   Target target = 1;
   LatencyDist accept_latency = 2;  // sync reply time
-  LatencyDist ack_latency = 3;     // async ACK / NAK or FCC decision delay
+  LatencyDist ack_latency = 3;     // async ACK / NAK or compliance decision delay
   double nak_rate = 4;
   double hit_rate = 5;
   double block_rate = 6;

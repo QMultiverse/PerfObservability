@@ -21,7 +21,7 @@ PAY_ROUTED: Final = "hub.pay.routed"
 OUT_FIN: Final = "hub.out.fin"
 OUT_MX: Final = "hub.out.mx"
 NET_ACK: Final = "hub.net.ack"
-FCC_DECISION: Final = "hub.fcc.decision"
+COMPLIANCE_DECISION: Final = "hub.compliance.decision"
 PAY_STATUS: Final = "hub.pay.status"
 PAY_STATE: Final = "hub.pay.state"
 
@@ -34,7 +34,7 @@ ALL_TOPICS: Final = (
     OUT_FIN,
     OUT_MX,
     NET_ACK,
-    FCC_DECISION,
+    COMPLIANCE_DECISION,
     PAY_STATUS,
     PAY_STATE,
 )
@@ -113,7 +113,7 @@ def topic_specs(partitions: int = 24, replication: int = 3) -> list[TopicSpec]:
         OUT_FIN: 3 * DAY_MS,
         OUT_MX: 3 * DAY_MS,
         NET_ACK: 3 * DAY_MS,
-        FCC_DECISION: 7 * DAY_MS,
+        COMPLIANCE_DECISION: 7 * DAY_MS,
         PAY_STATUS: 7 * DAY_MS,
     }
 
@@ -139,7 +139,7 @@ def topic_specs(partitions: int = 24, replication: int = 3) -> list[TopicSpec]:
         OUT_FIN,
         OUT_MX,
         NET_ACK,
-        FCC_DECISION,
+        COMPLIANCE_DECISION,
     ):
         for suffix in (RETRY_30S_SUFFIX, RETRY_5M_SUFFIX, DLQ_SUFFIX):
             specs.append(

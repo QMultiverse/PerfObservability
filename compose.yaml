@@ -1,6 +1,7 @@
 # The Payment Hub stack. One file, run from the repository root:
 #
-#   docker compose up -d          # everything, no -f needed
+#   python scripts/dev.py up      # builds the image once, then starts everything
+#   docker compose up -d          # the same, once the image exists; no -f needed
 #   docker compose logs -f hub
 #   docker compose down           # wipes all local data (no named volumes)
 #
@@ -19,9 +20,13 @@
 # per-stage containers join the same consumer groups, so running both just
 # splits the partitions between them for no benefit.
 #
-# Sized for a 16 GB Windows machine on Docker Desktop / WSL2, per design doc
-# section 9.1. Set memory=10GB and swap=4GB in %UserProfile%\.wslconfig, and
-# vm.max_map_count=262144 inside WSL2, before starting.
+# Runs the same on Windows, macOS and Linux (Docker Desktop or Docker Engine;
+# every image is published for amd64 and arm64). Sized for a 16 GB machine:
+# give Docker about 10 GB for the full stack. `python scripts/dev.py doctor`
+# checks memory, vm.max_map_count (Elasticsearch, Linux hosts) and free ports.
+#
+# Host ports can be changed in .env (GRAFANA_HOST_PORT and so on; see
+# .env.example). The ports inside the containers never change.
 #
 # THROWAWAY DATA: there are no named volumes anywhere in this file, so
 # `docker compose down` removes every container and all the logs with them.
@@ -80,7 +85,7 @@ services:
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_HOST_PORT:-29092}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
@@ -98,8 +103,8 @@ services:
       KAFKA_OPTS: -javaagent:/opt/jmx/jmx_prometheus_javaagent.jar=9404:/etc/jmx/kafka.yml
       CLUSTER_ID: hub-local-cluster-0001
     ports:
-      - "29092:29092"
-      - "9404:9404"   # JMX exporter /metrics
+      - "${KAFKA_HOST_PORT:-29092}:29092"
+      - "${KAFKA_JMX_HOST_PORT:-9404}:9404"   # JMX exporter /metrics
     mem_limit: 1500m
     healthcheck:
       # This spawns a JVM, which takes its time when Elasticsearch is starting
@@ -143,9 +148,9 @@ services:
       HUB_GRPC_PORT: "8443"
       HUB_DATABASE_URL: postgresql://hub:hub@postgres:5432/payments
     ports:
-      - "8443:8443"   # gRPC edge
-      - "8080:8080"   # status API
-      - "9464:9464"   # /metrics
+      - "${HUB_GRPC_HOST_PORT:-8443}:8443"     # gRPC edge
+      - "${HUB_STATUS_HOST_PORT:-8080}:8080"   # status API
+      - "${HUB_METRICS_HOST_PORT:-9464}:9464"  # /metrics
     mem_limit: 700m
     labels: *log-labels
 
@@ -157,7 +162,7 @@ services:
     environment:
       <<: *hub-env
       HUB_GRPC_PORT: "8443"
-    ports: ["8443:8443"]
+    ports: ["${HUB_GRPC_HOST_PORT:-8443}:8443"]
     mem_limit: 280m
 
   hub-fin-parser:
@@ -207,7 +212,7 @@ services:
     <<: *stage
     container_name: hub-status-api
     command: ["hub", "status-api"]
-    ports: ["8080:8080"]
+    ports: ["${HUB_STATUS_HOST_PORT:-8080}:8080"]
 
   hub-db-sink:
     <<: *stage
@@ -227,7 +232,7 @@ services:
     container_name: hub-retry
     command: ["hub", "retry"]
 
-  # ========================== External Systems Simulator (FIN, SnF, FCC) ==
+  # ========================== External Systems Simulator (FIN, SnF, compliance) ==
   ess:
     <<: *image
     container_name: hub-ess
@@ -248,7 +253,7 @@ services:
       <<: *hub-env
       ESS_MODE: ${ESS_MODE:-functional}
       ESS_PORT: "9101"
-    ports: ["9101:9101"]
+    ports: ["${ESS_HOST_PORT:-9101}:9101"]
     mem_limit: 300m
     labels: *log-labels
 
@@ -260,7 +265,7 @@ services:
       POSTGRES_DB: payments
       POSTGRES_USER: hub
       POSTGRES_PASSWORD: hub # local only
-    ports: ["5432:5432"]
+    ports: ["${POSTGRES_HOST_PORT:-5432}:5432"]
     mem_limit: 256m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hub -d payments"]
@@ -283,7 +288,7 @@ services:
       - cluster.routing.allocation.disk.watermark.high=95%
       - cluster.routing.allocation.disk.watermark.flood_stage=97%
     mem_limit: 3g
-    ports: ["9200:9200"]
+    ports: ["${ELASTICSEARCH_HOST_PORT:-9200}:9200"]
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
       interval: 10s
@@ -323,7 +328,7 @@ services:
       - NODE_OPTIONS=--max-old-space-size=1024
       - TELEMETRY_ENABLED=false
     mem_limit: 1g
-    ports: ["5601:5601"]
+    ports: ["${KIBANA_HOST_PORT:-5601}:5601"]
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -333,6 +338,10 @@ services:
     container_name: hub-filebeat
     profiles: ["elk"]
     user: root
+    # On SELinux hosts (Fedora, RHEL, CentOS) a container may not read the
+    # Docker socket or other containers' logs without this. It does nothing
+    # elsewhere.
+    security_opt: ["label=disable"]
     command: ["filebeat", "-e", "--strict.perms=false"]
     volumes:
       # Read-only mounts of the container logs. Not data storage: nothing here
@@ -360,7 +369,7 @@ services:
     volumes:
       - ./deploy/compose/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/compose/prometheus/rules:/etc/prometheus/rules:ro
-    ports: ["9090:9090"]
+    ports: ["${PROMETHEUS_HOST_PORT:-9090}:9090"]
     mem_limit: 600m
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9090/-/ready || exit 1"]
@@ -406,7 +415,7 @@ services:
     volumes:
       - ./deploy/compose/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    ports: ["3000:3000"]
+    ports: ["${GRAFANA_HOST_PORT:-3000}:3000"]
     mem_limit: 400m
     depends_on:
       prometheus:

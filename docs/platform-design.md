@@ -24,7 +24,7 @@ The Payment Hub (the Hub) ingests, validates, screens, routes and settles cross-
 |----------------------------------|-------------------------------------------------------------------|----------------------|
 | FIN (SWIFT network)              | Delivers and receives MT messages; returns ACK / NAK              | gRPC (section 3)     |
 | SWIFTNet Store-and-Forward (SnF) | Delivers and receives MX messages; ACK and delivery notification  | gRPC                 |
-| FCC (financial crime compliance) | Real-time sanctions / fraud screening; deferred decisions on hits | gRPC                 |
+| Compliance screening            | Real-time sanctions / fraud screening; deferred decisions on hits | gRPC                 |
 
 In test environments, all three are emulated by one mock, the **External Systems Simulator (ESS)**. The interfaces in this document are the same whether the Hub talks to the real systems or to the ESS, which is part of this platform and specified in section 8.
 
@@ -61,22 +61,22 @@ flowchart TB
 
 ## 3. External boundary
 
-The Hub talks to FIN, SnF and FCC **only through gRPC**. Kafka is internal: the Hub's gRPC edge writes what it receives into Kafka, and its processors read from and write to Kafka. No external party, and no test tool, ever writes into the Hub's Kafka.
+The Hub talks to FIN, SnF and compliance screening **only through gRPC**. Kafka is internal: the Hub's gRPC edge writes what it receives into Kafka, and its processors read from and write to Kafka. No external party, and no test tool, ever writes into the Hub's Kafka.
 
 ```mermaid
 flowchart TB
   subgraph EXT["External parties (ESS in test)"]
     FIN["FIN (MT)"]
     SNF["SnF (MX)"]
-    FCC["FCC"]
+    CMP["Compliance screening"]
   end
   subgraph HUB["Payment Hub (owns its Kafka)"]
     EDGE["gRPC edge"] --> KAF[("Kafka")] --> PROC["Processors<br/>parse, validate, screen, settle"] --> DISP["Dispatcher"]
   end
   FIN -- "DeliverFin, NotifyAck" --> EDGE
   SNF -- "DeliverMx, NotifyAck" --> EDGE
-  FCC -- "NotifyFccDecision" --> EDGE
-  PROC -- "Screen" --> FCC
+  CMP -- "NotifyComplianceDecision" --> EDGE
+  PROC -- "Screen" --> CMP
   DISP -- "SendMt" --> FIN
   DISP -- "SendMx" --> SNF
 ```
@@ -87,10 +87,10 @@ flowchart TB
 |----------------------------------------------------------------|---------------|-------------------------|-------------------------------------------------|-------------------------------------|
 | `HubInbound` (`DeliverFin`, `DeliverMx`)                       | Hub gRPC edge | FIN / SnF               | The network delivering a message to the bank    | Every inbound payment               |
 | `HubNetworkEvents` (`NotifyAck`, `NotifyDeliveryNotification`) | Hub gRPC edge | FIN / SnF               | Network ACK / NAK and SnF delivery notification | After each outbound send            |
-| `HubCompliance` (`NotifyFccDecision`)                          | Hub gRPC edge | FCC                     | Analyst decision on a screening hit             | Only for hits, minutes later        |
+| `HubCompliance` (`NotifyComplianceDecision`)                          | Hub gRPC edge | Compliance service      | Analyst decision on a screening hit             | Only for hits, minutes later        |
 | `FinGateway` (`SendMt`)                                        | FIN interface | Hub dispatcher          | The bank sending an MT over FIN                 | Every outbound MT                   |
 | `SnfGateway` (`SendMx`)                                        | SnF interface | Hub dispatcher          | The bank sending an MX over SnF                 | Every outbound MX                   |
-| `FccScreening` (`Screen`)                                      | FCC           | Hub screening processor | Real-time sanctions / fraud check               | Every payment, on the critical path |
+| `ComplianceScreening` (`Screen`)                                      | Compliance    | Hub screening processor | Real-time sanctions / fraud check               | Every payment, on the critical path |
 
 **Transport rule:** anything that must be durable, or that arrives later, goes on Kafka inside the Hub. Anything that needs an immediate answer with a deadline is a gRPC call.
 
@@ -103,8 +103,8 @@ The boundary has seven business RPCs, all unary: four served by the Hub and thre
 | 1   | `HubInbound.DeliverFin`           | FIN → Hub       | UETR, raw MT (blocks 1–5), sender BIC, network timestamp                      | `ACCEPTED`: the Hub owns the message          | Light checks (size, duplicate UETR), write to `hub.in.fin.raw` with `acks=all`, then reply. No parsing on this path. |
 | 2   | `HubInbound.DeliverMx`            | SnF → Hub       | UETR, head.001 AppHdr XML, pacs.008 / pacs.009 Document XML, SnF ref          | `ACCEPTED`                                    | Same as \#1, written to `hub.in.mx.raw`                                                                              |
 | 3   | `HubNetworkEvents.NotifyAck`      | FIN / SnF → Hub | UETR, network (FIN / SNF), ACK or NAK, error code, send reference             | Received                                      | Write to `hub.net.ack`                                                                                               |
-| 4   | `HubCompliance.NotifyFccDecision` | FCC → Hub       | UETR, case ID, RELEASE or BLOCK                                               | Received                                      | Write to `hub.fcc.decision`                                                                                          |
-| 5   | `FccScreening.Screen`             | Hub → FCC       | UETR, parties (names, BICs, countries), amount, currency                      | `NO_HIT`, `HIT_PENDING` + case ID, or `BLOCK` | Screening processor waits for the reply (deadline, e.g. 1 s)                                                         |
+| 4   | `HubCompliance.NotifyComplianceDecision` | Compliance → Hub       | UETR, case ID, RELEASE or BLOCK                                               | Received                                      | Write to `hub.compliance.decision`                                                                                          |
+| 5   | `ComplianceScreening.Screen`             | Hub → Compliance       | UETR, parties (names, BICs, countries), amount, currency                      | `NO_HIT`, `HIT_PENDING` + case ID, or `BLOCK` | Screening processor waits for the reply (deadline, e.g. 1 s)                                                         |
 | 6   | `FinGateway.SendMt`               | Hub → FIN       | UETR, raw outbound MT, receiver BIC                                           | `ACCEPTED` + session / ISN                    | Dispatcher records "sent" and waits for \#3 asynchronously                                                           |
 | 7   | `SnfGateway.SendMx`               | Hub → SnF       | UETR, AppHdr + Document, requestor / responder DN, delivery-notification flag | `ACCEPTED` + SnF ref                          | As \#6                                                                                                               |
 
@@ -157,14 +157,14 @@ message NetworkAck {
 }
 
 service HubCompliance {
-  rpc NotifyFccDecision (FccDecision) returns (Received);
+  rpc NotifyComplianceDecision (ComplianceDecision) returns (Received);
 }
-message FccDecision { MsgRef ref = 1; string case_id = 2; string decision = 3; }
+message ComplianceDecision { MsgRef ref = 1; string case_id = 2; string decision = 3; }
 
-// ===== ext/v1/networks.proto  (served by FIN / SnF interfaces and FCC) =====
+// ===== ext/v1/networks.proto  (served by FIN / SnF interfaces and compliance screening) =====
 service FinGateway   { rpc SendMt (SendMtRequest) returns (SendAccepted); }
 service SnfGateway   { rpc SendMx (SendMxRequest) returns (SendAccepted); }
-service FccScreening { rpc Screen (ScreenRequest) returns (ScreenResult); }
+service ComplianceScreening { rpc Screen (ScreenRequest) returns (ScreenResult); }
 ```
 
 **Rules that apply to every call**
@@ -187,7 +187,7 @@ A single pacs.008 makes four gRPC calls across the boundary (deliver, screen, se
 
 ```mermaid
 sequenceDiagram
-  participant X as SnF / FCC
+  participant X as SnF / Compliance
   participant E as Hub gRPC edge
   participant K as Hub Kafka
   participant P as Processors
@@ -225,7 +225,7 @@ sequenceDiagram
 
 Because one UETR then carries two messages, each stage's idempotency marker is per leg (`screened:MT103`, `screened:MT202COV`) rather than per UETR; otherwise the first leg would mark the stage done and the second would be skipped.
 
-**Screening hits:** at step 6 FCC returns `HIT_PENDING` and the payment is parked in state HELD. Minutes later FCC calls `NotifyFccDecision`; the Hub writes it to `hub.fcc.decision`, and processing resumes from step 7.
+**Screening hits:** at step 6 the compliance service returns `HIT_PENDING` and the payment is parked in state HELD. Minutes later the compliance service calls `NotifyComplianceDecision`; the Hub writes it to `hub.compliance.decision`, and processing resumes from step 7.
 
 ## 6. Touchpoint map: every gRPC and Kafka hop
 
@@ -241,9 +241,9 @@ flowchart TB
   FP -- "7 write" --> TC[("hub.pay.canonical")]
   MP -- "7 write" --> TC
   TC -- "8 read" --> SCR["Screening"]
-  SCR -- "9 Screen (gRPC)" --> FCC["FCC"]
-  FCC -- "11 NotifyFccDecision (gRPC)" --> EC["Hub gRPC edge · HubCompliance"]
-  EC -- "12 write" --> TD[("hub.fcc.decision")]
+  SCR -- "9 Screen (gRPC)" --> CMP["Compliance screening"]
+  CMP -- "11 NotifyComplianceDecision (gRPC)" --> EC["Hub gRPC edge · HubCompliance"]
+  EC -- "12 write" --> TD[("hub.compliance.decision")]
   TD -- "13 read" --> SCR
   SCR -- "10 write" --> TS[("hub.pay.screened")]
   TS -- "14 read" --> RT["Routing"]
@@ -271,11 +271,11 @@ flowchart TB
 | 6   | Kafka read  | `hub.in.mx.raw` → MX parser                | `cg-mx-parser`                      | Parse XML, XSD + CBPR+ checks, map to canonical | —                              |
 | 7   | Kafka write | Parsers → `hub.pay.canonical`              | produce                             | Canonical payment with `format` header          | T2                             |
 | 8   | Kafka read  | `hub.pay.canonical` → Screening            | `cg-screening`                      | Build screening request                         | —                              |
-| 9   | gRPC        | Screening → FCC                            | `FccScreening.Screen`               | NO_HIT, HIT_PENDING or BLOCK                    | T3 (reply)                     |
+| 9   | gRPC        | Screening → Compliance                            | `ComplianceScreening.Screen`               | NO_HIT, HIT_PENDING or BLOCK                    | T3 (reply)                     |
 | 10  | Kafka write | Screening → `hub.pay.screened`             | produce                             | Cleared payment moves on (hits go to HELD)      | —                              |
-| 11  | gRPC        | FCC → Hub edge                             | `HubCompliance.NotifyFccDecision`   | Release or block for a held payment             | hit decided                    |
-| 12  | Kafka write | Hub edge → `hub.fcc.decision`              | produce                             | Decision stored durably                         | —                              |
-| 13  | Kafka read  | `hub.fcc.decision` → Screening             | `cg-screening`                      | Released payment resumes at 10                  | —                              |
+| 11  | gRPC        | Compliance → Hub edge                             | `HubCompliance.NotifyComplianceDecision`   | Release or block for a held payment             | hit decided                    |
+| 12  | Kafka write | Hub edge → `hub.compliance.decision`              | produce                             | Decision stored durably                         | —                              |
+| 13  | Kafka read  | `hub.compliance.decision` → Screening             | `cg-screening`                      | Released payment resumes at 10                  | —                              |
 | 14  | Kafka read  | `hub.pay.screened` → Routing               | `cg-routing`                        | Choose FIN or SnF and the outbound format       | —                              |
 | 15  | Kafka write | Routing → `hub.pay.routed`                 | produce                             | Routed payment                                  | —                              |
 | 16  | Kafka read  | `hub.pay.routed` → Settlement              | `cg-settlement`                     | Post to the ledger                              | —                              |
@@ -310,12 +310,12 @@ Kafka is the Hub's durable work queue and audit trail. Every stage reads a topic
 | `hub.in.fin.raw`                         | gRPC edge (`DeliverFin`)        | `cg-fin-parser`                                                                 | Raw MT exactly as received                                  | delete, 7 days (the replay source)                |
 | `hub.in.mx.raw`                          | gRPC edge (`DeliverMx`)         | `cg-mx-parser`                                                                  | Raw AppHdr + Document                                       | delete, 7 days                                    |
 | `hub.pay.canonical`                      | FIN and MX parsers              | `cg-screening`                                                                  | Canonical payment + `format` header (MT / MX)               | delete, 3 days                                    |
-| `hub.pay.screened`                       | Screening processor             | `cg-routing`                                                                    | Payment + FCC outcome                                       | delete, 3 days                                    |
+| `hub.pay.screened`                       | Screening processor             | `cg-routing`                                                                    | Payment + compliance outcome                                       | delete, 3 days                                    |
 | `hub.pay.routed`                         | Routing processor               | `cg-settlement`                                                                 | Payment + route, outbound format                            | delete, 3 days                                    |
 | `hub.out.fin`                            | Settlement processor            | `cg-dispatch-fin`                                                               | Outbound MT, ready to send                                  | delete, 3 days                                    |
 | `hub.out.mx`                             | Settlement processor            | `cg-dispatch-mx`                                                                | Outbound MX, ready to send                                  | delete, 3 days                                    |
 | `hub.net.ack`                            | gRPC edge (`NotifyAck`)         | `cg-ack-matcher`                                                                | ACK / NAK, delivery notifications                           | delete, 3 days                                    |
-| `hub.fcc.decision`                       | gRPC edge (`NotifyFccDecision`) | `cg-screening`                                                                  | RELEASE / BLOCK for held payments                           | delete, 7 days                                    |
+| `hub.compliance.decision`                       | gRPC edge (`NotifyComplianceDecision`) | `cg-screening`                                                                  | RELEASE / BLOCK for held payments                           | delete, 7 days                                    |
 | `hub.pay.status`                         | Every processor                 | `cg-status-api`, `cg-db-sink` (+ a read-only test tracker in perf environments) | Every state change (RECEIVED … COMPLETED / REJECTED / HELD) | delete, 7 days                                    |
 | `hub.pay.state`                          | Every processor                 | Processors (lookups on restart)                                                 | Latest state per UETR                                       | **compact**: keeps only the newest record per key |
 | `<topic>.retry.30s`, `.retry.5m`, `.dlq` | Any consumer that fails         | Retry consumers, ops                                                            | Failed record + error                                       | delete, 14 days                                   |
@@ -336,7 +336,7 @@ consumer = Consumer(
 )
 producer = Producer({"transactional.id": f"screening-{pod}", "enable.idempotence": True})
 producer.init_transactions()
-consumer.subscribe(["hub.pay.canonical", "hub.fcc.decision"])
+consumer.subscribe(["hub.pay.canonical", "hub.compliance.decision"])
 
 while True:
     batch = consumer.consume(num_messages=500, timeout=0.05)
@@ -345,9 +345,9 @@ while True:
         pay = Payment.FromString(rec.value())
         if state_store.already_done(pay.uetr, stage="screened"):  # idempotency
             continue
-        result = fcc_stub.Screen(
+        result = compliance_stub.Screen(
             to_screen_request(pay), timeout=1.0, metadata=grpc_meta(rec.headers())
-        )  # gRPC to FCC
+        )  # gRPC to the compliance service
         out = apply(pay, result)  # NO_HIT -> screened, HIT_PENDING -> HELD
         producer.produce(
             next_topic(out), key=pay.uetr, value=out.SerializeToString(), headers=carry_headers(rec)
@@ -366,7 +366,7 @@ while True:
 
 - **Calls outside Kafka are not transactional.** `Screen`, `SendMt` and `SendMx` may be repeated after a crash, which is why every receiver de-duplicates on UETR and message type (section 4).
 
-- **Stateful steps** keep a local state store, rebuilt from `hub.pay.state` on restart. It holds cover legs waiting for their partner, payments HELD for an FCC decision, payments dispatched and awaiting an ACK, and a bounded window of recently completed UETRs so a repeated network callback is recognised as a repeat. The two stateful stages are **screening** and the **ACK matcher**; both subscribe to `hub.pay.state` alongside their own input topics, and state records in a batch are folded in before the batch is processed, so an ACK that arrives with its own payment still matches. Implemented in-memory (`hub/common/state_store.py`) behind an interface a Valkey or RocksDB version can replace.
+- **Stateful steps** keep a local state store, rebuilt from `hub.pay.state` on restart. It holds cover legs waiting for their partner, payments HELD for a compliance decision, payments dispatched and awaiting an ACK, and a bounded window of recently completed UETRs so a repeated network callback is recognised as a repeat. The two stateful stages are **screening** and the **ACK matcher**; both subscribe to `hub.pay.state` alongside their own input topics, and state records in a batch are folded in before the batch is processed, so an ACK that arrives with its own payment still matches. Implemented in-memory (`hub/common/state_store.py`) behind an interface a Valkey or RocksDB version can replace.
 
 - **Failures:** a processing error sends the record to `.retry.30s`, then `.retry.5m`, then `.dlq`, inside the same transaction that advances the offset — so the main partition keeps flowing and one bad message doesn't block the rest. A separate service (`cg-retry`) waits out the delay and republishes to the origin topic; waiting inside the failing stage would hold the partition the ladder exists to free. Errors that can never succeed (malformed message, failed validation, a network rejecting the message itself) skip the ladder and go straight to the DLQ.
 
@@ -374,7 +374,7 @@ while True:
 
 ## 8. External Systems Simulator (ESS)
 
-The ESS is part of the Payment Hub deliverable: the Hub can't be developed, integration-tested or performance-tested without it. It stands in for FIN, SnF and FCC through the exact gRPC contract in section 4, so switching the Hub from the ESS to the real systems is a configuration change, not a code change.
+The ESS is part of the Payment Hub deliverable: the Hub can't be developed, integration-tested or performance-tested without it. It stands in for FIN, SnF and compliance screening through the exact gRPC contract in section 4, so switching the Hub from the ESS to the real systems is a configuration change, not a code change.
 
 ```mermaid
 flowchart TB
@@ -387,7 +387,7 @@ flowchart TB
     REC["Recorder<br/>one row per call"]
     FINE["FIN emulator"]
     SNFE["SnF emulator"]
-    FCCE["FCC emulator"]
+    CMPE["compliance emulator"]
     SND["Inbound sender"]
   end
   ESS -- "gRPC contract (section 4), both directions" --- HUB["Payment Hub"]
@@ -399,7 +399,7 @@ flowchart TB
 |-------------------|------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------|
 | FIN emulator      | Accepts outbound MT; returns ACK / NAK after a configured delay; delivers inbound MT on request                        | Serves `FinGateway.SendMt`; calls `HubNetworkEvents.NotifyAck`, `HubInbound.DeliverFin`  |
 | SnF emulator      | Same for MX, plus SnF delivery notifications                                                                           | Serves `SnfGateway.SendMx`; calls `NotifyAck`, `NotifyDeliveryNotification`, `DeliverMx` |
-| FCC emulator      | Answers screening by rule (e.g. party names on a test list) or by rate; sends deferred decisions on hits               | Serves `FccScreening.Screen`; calls `HubCompliance.NotifyFccDecision`                    |
+| compliance emulator      | Answers screening by rule (e.g. party names on a test list) or by rate; sends deferred decisions on hits               | Serves `ComplianceScreening.Screen`; calls `HubCompliance.NotifyComplianceDecision`                    |
 | Inbound sender    | Sends single messages or scripted sequences into the Hub                                                               | Calls `DeliverFin` / `DeliverMx`                                                         |
 | Scenario engine   | Holds behaviour profiles (latency, NAK / hit / block rates, outages) and named test cases                              | Driven through the control API                                                           |
 | Recorder          | Writes one row per call made or received (UETR, flow, format, method, timestamp, outcome); exposes Prometheus counters | Parquet files, `/metrics`                                                                |
@@ -410,7 +410,7 @@ flowchart TB
 | Mode             | Used by                                    | Behaviour                                                                                                                                                            |
 |------------------|--------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Functional       | Hub developers, local and dev environments | Deterministic replies; named cases trigger specific outcomes (NAK, sanctions hit, block, timeout, duplicate)                                                         |
-| Integration / CI | CI pipeline on every Hub change            | Contract tests against the proto files, plus fault injection: outages, slow FCC, delayed ACKs, duplicate callbacks                                                   |
+| Integration / CI | CI pipeline on every Hub change            | Contract tests against the proto files, plus fault injection: outages, slow compliance screening, delayed ACKs, duplicate callbacks                                                   |
 | Performance      | Performance framework                      | Latency drawn from distributions, recorder on, horizontally scaled replicas. High-rate inbound load comes from paygen (performance document), not the inbound sender |
 
 **Control API**
@@ -425,7 +425,7 @@ service EssControl {
 }
 message LatencyDist { string kind = 1; double p50_ms = 2; double p99_ms = 3; }
 message BehaviourProfile {
-  string      target         = 1;  // FIN | SNF | FCC
+  string      target         = 1;  // FIN | SNF | COMPLIANCE
   LatencyDist accept_latency = 2;  // sync reply time
   LatencyDist ack_latency    = 3;  // async ACK / NAK or decision delay
   double      nak_rate       = 4;
@@ -442,7 +442,7 @@ ess serve --mode functional --hub hub-edge.hub.svc:8443
 ess send --type pacs.008 --file samples/pacs008_eur.xml     # one inbound MX
 ess send --type MT103 --file samples/mt103_gbp.fin           # one inbound MT
 ess case run mt103_sanctions_hit                             # scripted end-to-end case
-ess profile set fcc --hit-rate 0.02 --decision-delay 5m
+ess profile set compliance --hit-rate 0.02 --decision-delay 5m
 ess profile set fin --outage --for 2m                        # fault injection
 ess counters --run-id S02-2026-09-28-01
 ```
@@ -473,7 +473,7 @@ Every payment can be followed hop by hop in Kibana. A few identifiers travel as 
 | `payment.trace`      | `full` / `standard` / `minimal` / errors / none | Tracking level for this payment (9.1) |
 | `run.id` (test only) | `S02-2026-09-28-01`                             | Isolate a test run                    |
 
-Rules: keep baggage under 512 bytes, and never put names, accounts or amounts in it. Strip it from calls to the real FIN, SnF and FCC.
+Rules: keep baggage under 512 bytes, and never put names, accounts or amounts in it. Strip it from calls to the real FIN, SnF and compliance screening.
 
 **What gets logged at each touchpoint**
 
@@ -688,8 +688,8 @@ autoMemoryReclaim=gradual
 - Is the business definition of a completed payment the outbound handoff, the network ACK, or the final pacs.002 status?
   *Implemented as the network ACK*, because that is what the flow in section 5 stamps T6 on. The choice is named in one place, `COMPLETION_RULE` in `hub/ack_matcher/processor.py`.
 
-- Is the real FCC call synchronous on the payment path, or does the Hub publish for screening and wait for a result event?
-  *Implemented synchronously*, as section 4 specifies, with a 1 s deadline. An event-based FCC would change `hub/screening/processor.py` only: the deferred-decision path through `hub.fcc.decision` already exists and is what a hit uses.
+- Is the real compliance screening call synchronous on the payment path, or does the Hub publish for screening and wait for a result event?
+  *Implemented synchronously*, as section 4 specifies, with a 1 s deadline. An event-based compliance service would change `hub/screening/processor.py` only: the deferred-decision path through `hub.compliance.decision` already exists and is what a hit uses.
 
 - What is the expected MT vs MX volume split now that coexistence has ended, and how much MT arrives via Swift's contingency conversion or in-flow translation?
 

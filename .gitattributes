@@ -1,0 +1,17 @@
+# One line-ending policy for every checkout. Config files are mounted into
+# Linux containers and scripts are run on three operating systems; CRLF in
+# either breaks them, and Git's per-machine autocrlf setting is not something
+# a repository can rely on.
+* text=auto eol=lf
+
+# Windows-only scripts keep Windows line endings.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touched.
+*.png  binary
+*.jpg  binary
+*.docx binary
+*.pdf  binary
+*.jar  binary

@@ -48,6 +48,10 @@ HDR_ORIGIN: Final = "hub-origin-topic"
 HDR_RETRY_AT: Final = "hub-retry-at-ns"
 
 
+#: How often a stage looks at its partition assignment.
+_ASSIGNMENT_CHECK_S: Final = 5.0
+
+
 class PermanentError(Exception):
     """The record can never succeed. Goes straight to the DLQ, no retries.
 
@@ -277,6 +281,9 @@ class ProcessorRunner:
             processor.events,
         )
         metrics.state_stores.register(processor.name, processor.store)
+        metrics.stage_stalled.labels(processor.name).set(0)
+        self._unassigned_since: float | None = None
+        self._assignment_checked = 0.0
 
     # ------------------------------------------------------------- driving
     async def run_forever(self) -> None:
@@ -287,6 +294,7 @@ class ProcessorRunner:
             self.processor.group_id,
         )
         while not self._stopping.is_set():
+            self.check_assignment()
             handled = await self.run_once()
             if handled == 0:
                 # Nothing to do; yield rather than spin the CPU. Idle time is
@@ -294,6 +302,47 @@ class ProcessorRunner:
                 idle = self.settings.kafka.poll_timeout_s
                 await asyncio.sleep(idle)
                 metrics.kafka_io_wait.labels(self.processor.name).inc(idle)
+
+    def check_assignment(self, now: float | None = None) -> bool:
+        """Rejoin the group if this stage has held no partitions for too long.
+
+        After the host slept, the broker dropped the Hub's consumers and most
+        never rejoined: they kept polling an empty assignment, with no error
+        and a healthy-looking process (perf scenario 1). A fresh consumer
+        joins the group again. Checked between batches, never inside one.
+        Returns True when it replaced the consumer.
+        """
+        limit = self.settings.kafka.rejoin_after_s
+        now = time.monotonic() if now is None else now
+        if limit <= 0 or now - self._assignment_checked < _ASSIGNMENT_CHECK_S:
+            return False
+        self._assignment_checked = now
+        name = self.processor.name
+        if self.consumer.assignment():
+            self._unassigned_since = None
+            metrics.stage_stalled.labels(name).set(0)
+            return False
+        if self._unassigned_since is None:
+            self._unassigned_since = now
+            return False
+        if now - self._unassigned_since < limit:
+            return False
+
+        metrics.stage_stalled.labels(name).set(1)
+        metrics.kafka_consumer_rejoins.labels(name).inc()
+        log.warning(
+            "%s has held no partitions for %.0f s; rejoining %s",
+            name,
+            now - self._unassigned_since,
+            self.processor.group_id,
+        )
+        try:
+            self.consumer.close()
+        except Exception:
+            log.exception("%s: closing the stalled consumer failed", name)
+        self.consumer = self.bus.consumer(self.processor.group_id, self.topics)
+        self._unassigned_since = now  # the new consumer gets its own full timeout
+        return True
 
     async def run_once(self) -> int:
         """Read, process and commit one batch. Returns the record count."""

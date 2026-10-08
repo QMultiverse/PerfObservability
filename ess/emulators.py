@@ -1,10 +1,10 @@
-"""The FIN, SnF and FCC emulators.
+"""The FIN, SnF and compliance screening emulators.
 
 Each one serves the gRPC service the real system serves and calls back into
 the Hub edge exactly as the real system would, so switching the Hub from the
 ESS to production is three addresses in configuration, not a code change.
 
-Callbacks (``NotifyAck``, ``NotifyDeliveryNotification``, ``NotifyFccDecision``)
+Callbacks (``NotifyAck``, ``NotifyDeliveryNotification``, ``NotifyComplianceDecision``)
 are scheduled as background tasks after a configured delay, because that is how
 the real networks behave: the synchronous reply says "accepted", and what
 happened arrives later.
@@ -29,7 +29,7 @@ from hub_model import proto as pb
 from hub_model.envelope import now_ns
 from hub_model.ids import new_uetr
 from hub_model.proto import (
-    FccDecision,
+    ComplianceDecision,
     NetworkAck,
     ScreenRequest,
     ScreenResult,
@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 
 SERVICE_NAME: Final = "ess"
 
-# Network notifications (ACK, delivery notification, FCC decision) are
+# Network notifications (ACK, delivery notification, compliance decision) are
 # redelivered until the Hub takes them, as a real FIN / SnF interface keeps an
 # undelivered ACK queued. Giving up after one call left payments DISPATCHED
 # forever (found by perf scenarios 1, 3 and 4). The Hub de-duplicates repeats.
@@ -82,7 +82,7 @@ ess_notify_abandoned = PromCounter(
     registry=REGISTRY,
 )
 
-# Party names the FCC emulator treats as a deterministic hit. Invented; see
+# Party names the compliance emulator treats as a deterministic hit. Invented; see
 # hub_format.samples.SANCTIONS_NAMES.
 WATCHLIST: Final = frozenset({"REDLIST HOLDINGS SA", "BLOCKED VENTURES LLC"})
 BLOCKLIST: Final = frozenset({"BLOCKED VENTURES LLC"})
@@ -455,16 +455,16 @@ class SnfEmulator(EmulatorBase, pb.SnfGatewayServicer):
         )
 
 
-class FccEmulator(EmulatorBase, pb.FccScreeningServicer):
+class ComplianceEmulator(EmulatorBase, pb.ComplianceScreeningServicer):
     """Answers screening by watchlist name or by rate, and decides hits later."""
 
-    target_name = "FCC"
+    target_name = "COMPLIANCE"
 
     async def Screen(  # noqa: N802 - gRPC method name
         self, request: ScreenRequest, context: grpc.aio.ServicerContext
     ) -> ScreenResult:
         started = now_ns()
-        await self.guard_outage(context, "FccScreening.Screen")
+        await self.guard_outage(context, "ComplianceScreening.Screen")
         await self.pause_accept()
 
         outcome, matched = self._decide(request)
@@ -480,7 +480,7 @@ class FccEmulator(EmulatorBase, pb.FccScreeningServicer):
             result.reason = "party matched the test blocklist"
 
         self.recorder.record(
-            method="FccScreening.Screen",
+            method="ComplianceScreening.Screen",
             direction="SERVED",
             outcome=ScreenResult.Outcome.Name(outcome),
             started_ns=started,
@@ -530,9 +530,9 @@ class FccEmulator(EmulatorBase, pb.FccScreeningServicer):
             if override is not None
             else self.rng.random() < self.profile.release_rate
         )
-        decision = FccDecision(
+        decision = ComplianceDecision(
             case_id=case_id,
-            decision=FccDecision.RELEASE if release else FccDecision.BLOCK,
+            decision=ComplianceDecision.RELEASE if release else ComplianceDecision.BLOCK,
             reason="analyst review complete",
             decided_ns=now_ns(),
         )
@@ -540,8 +540,8 @@ class FccEmulator(EmulatorBase, pb.FccScreeningServicer):
 
         stub = pb.HubComplianceStub(self.hub_channel())
         await self.notify_reliably(
-            lambda: stub.NotifyFccDecision(decision, timeout=DEADLINE_NOTIFY_S),
-            method="HubCompliance.NotifyFccDecision",
+            lambda: stub.NotifyComplianceDecision(decision, timeout=DEADLINE_NOTIFY_S),
+            method="HubCompliance.NotifyComplianceDecision",
             ref=ref,
             outcome="RELEASE" if release else "BLOCK",
         )

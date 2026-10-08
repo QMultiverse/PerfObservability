@@ -140,7 +140,7 @@ def test_rebalances_are_counted_per_group() -> None:
     ("method", "expected"),
     [
         ("/hub.v1.HubInbound/DeliverMx", ("hub.v1.HubInbound", "DeliverMx")),
-        ("/ext.v1.FccScreening/Screen", ("ext.v1.FccScreening", "Screen")),
+        ("/ext.v1.ComplianceScreening/Screen", ("ext.v1.ComplianceScreening", "Screen")),
         ("Bare", ("unknown", "Bare")),
     ],
 )

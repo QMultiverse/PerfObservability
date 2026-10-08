@@ -71,10 +71,12 @@ USER hub
 # 8443 gRPC edge, 8080 status API, 9101 ESS, 9464 /metrics.
 EXPOSE 8443 8080 9101 9464
 
-# The metrics endpoint doubles as a liveness signal: a process serving /metrics
-# has finished bootstrap. Overridden to none for the one-shot containers.
+# Healthy means: /metrics is served (bootstrap finished) AND no stage is
+# stalled. A stage that holds no Kafka partitions keeps running and serving
+# metrics while doing no work, so liveness alone called a dead pipeline healthy.
+# Overridden to none for the one-shot containers.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://localhost:' + os.environ.get('HUB_METRICS_PORT','9464') + '/metrics', timeout=2)"
+    CMD python -c "import os,sys,urllib.request; t=urllib.request.urlopen('http://localhost:' + os.environ.get('HUB_METRICS_PORT','9464') + '/metrics', timeout=2).read().decode(); sys.exit(any(l.startswith('hub_stage_stalled') and l.rstrip().endswith(' 1.0') for l in t.splitlines()))"
 
 ENTRYPOINT ["python", "-m"]
 CMD ["hub", "edge"]

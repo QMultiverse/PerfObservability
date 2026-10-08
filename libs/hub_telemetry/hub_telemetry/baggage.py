@@ -8,7 +8,7 @@ Rules, enforced here:
 
 * the whole header stays under 512 bytes;
 * names, accounts and amounts never go in — only the seven keys below;
-* it is stripped on calls to the real FIN, SnF and FCC.
+* it is stripped on calls to the real FIN, SnF and compliance screening.
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ def inject(carrier: MutableMapping[str, str] | None = None) -> dict[str, str]:
 
 
 def strip(headers: Mapping[str, str]) -> dict[str, str]:
-    """Drop the context headers. Used on calls to the *real* FIN, SnF and FCC.
+    """Drop the context headers. Used on calls to the *real* FIN, SnF and compliance screening.
 
     ``traceparent`` goes too: the UETR is inside baggage, but a trace id is
     still internal routing information we do not hand to a third party.

@@ -7,7 +7,7 @@ groups:
       # Transactions per second, from the Hub's own state counter. A stand-in
       # until ess_transactions_total exists: that one counts the ESS's
       # independent view at T4 (handoff) and T6 (completed), which is what
-      # performance-testing.md 2.1 makes authoritative.
+      # docs/performance-testing.md 2.1 makes authoritative.
       - record: hub:received_tps
         expr: sum by (format) (rate(hub_payments_state_total{state="RECEIVED"}[1m]))
 

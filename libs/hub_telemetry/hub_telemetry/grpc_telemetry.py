@@ -14,6 +14,7 @@ async.
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -28,10 +29,16 @@ from . import baggage, metrics
 from .events import Events
 
 # Deadlines from design doc section 4.
-DEADLINE_DELIVER_S: Final = 0.200
-DEADLINE_NOTIFY_S: Final = 0.200
-DEADLINE_SEND_S: Final = 0.500
-DEADLINE_SCREEN_S: Final = 1.000
+#
+# HUB_DEADLINE_SCALE multiplies them all and is 1 everywhere that matters. The
+# test suite sets it higher: its calls are real gRPC over loopback, and on a
+# loaded laptop or a shared CI runner a 200 ms deadline is missed for reasons
+# that have nothing to do with the code under test.
+_SCALE: Final = float(os.environ.get("HUB_DEADLINE_SCALE") or 1.0)
+DEADLINE_DELIVER_S: Final = 0.200 * _SCALE
+DEADLINE_NOTIFY_S: Final = 0.200 * _SCALE
+DEADLINE_SEND_S: Final = 0.500 * _SCALE
+DEADLINE_SCREEN_S: Final = 1.000 * _SCALE
 
 MAX_ATTEMPTS: Final = 3
 BACKOFF_BASE_S: Final = 0.020
@@ -164,7 +171,7 @@ class ClientTelemetryInterceptor(UnaryUnaryClientInterceptor):
         self._events = events
         self._target = target
         self._max_attempts = max_attempts
-        # True when the peer is the *real* FIN / SnF / FCC: baggage and
+        # True when the peer is the *real* FIN / SnF / compliance service: baggage and
         # traceparent are internal and must not leave the bank.
         self._strip_context = strip_context
         self._rng = rng

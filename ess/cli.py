@@ -4,7 +4,7 @@
     ess send --type pacs.008 --file samples/pacs008_eur.xml
     ess send --type MT103 --file samples/mt103_gbp.fin
     ess case run mt103_sanctions_hit
-    ess profile set fcc --hit-rate 0.02 --decision-delay 5m
+    ess profile set compliance --hit-rate 0.02 --decision-delay 5m
     ess profile set fin --outage --for 2m
     ess counters --run-id S02-2026-09-28-01
 
@@ -35,7 +35,7 @@ from .server import DEFAULT_PORT, EssSettings, serve
 
 app = typer.Typer(
     add_completion=False,
-    help="External Systems Simulator — plays FIN, SnF and FCC for the Payment Hub.",
+    help="External Systems Simulator — plays FIN, SnF and compliance screening for the Hub.",
     no_args_is_help=True,
 )
 profile_app = typer.Typer(help="Change emulator behaviour at runtime.", no_args_is_help=True)
@@ -45,7 +45,12 @@ app.add_typer(case_app, name="case")
 
 _DURATION = re.compile(r"^(?P<value>[\d.]+)(?P<unit>ms|s|m|h)?$")
 
-TARGETS = {"fin": pb.Target.FIN, "snf": pb.Target.SNF, "fcc": pb.Target.FCC, "all": pb.Target.ALL}
+TARGETS = {
+    "fin": pb.Target.FIN,
+    "snf": pb.Target.SNF,
+    "compliance": pb.Target.COMPLIANCE,
+    "all": pb.Target.ALL,
+}
 
 
 def parse_duration(text: str) -> float:
@@ -260,7 +265,7 @@ def case_run_all(
 # --------------------------------------------------------------- profiles
 @profile_app.command("set")
 def profile_set(
-    target: Annotated[str, typer.Argument(help="fin | snf | fcc | all")],
+    target: Annotated[str, typer.Argument(help="fin | snf | compliance | all")],
     accept_latency: Annotated[
         str, typer.Option("--accept-latency", help="Synchronous reply time, e.g. 10ms")
     ] = "",
@@ -268,7 +273,7 @@ def profile_set(
         str, typer.Option("--ack-latency", help="Async ACK delay, e.g. 50ms")
     ] = "",
     decision_delay: Annotated[
-        str, typer.Option("--decision-delay", help="FCC analyst decision delay, e.g. 5m")
+        str, typer.Option("--decision-delay", help="Compliance analyst decision delay, e.g. 5m")
     ] = "",
     p99: Annotated[str, typer.Option("--p99", help="99th percentile for a drawn latency")] = "",
     kind: Annotated[str, typer.Option("--kind", help="fixed | uniform | lognormal")] = "",
@@ -306,7 +311,7 @@ def profile_set(
                 p99_ms=parse_duration(p99) * 1000 if p99 else ms,
             )
         )
-    # --decision-delay is the FCC-shaped name for the same field.
+    # --decision-delay is the compliance-shaped name for the same field.
     async_latency = ack_latency or decision_delay
     if async_latency:
         ms = parse_duration(async_latency) * 1000

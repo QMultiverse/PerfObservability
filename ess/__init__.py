@@ -1,4 +1,4 @@
-"""External Systems Simulator — FIN, SnF and FCC for the Payment Hub.
+"""External Systems Simulator — FIN, SnF and compliance screening for the Payment Hub.
 
 Part of the platform deliverable, not a test fixture bolted on: the Hub cannot
 be developed, integration-tested or performance-tested without it. It serves

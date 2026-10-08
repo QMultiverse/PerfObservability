@@ -213,7 +213,7 @@ async def start_harness(
             bootstrap_servers="memory", partitions=4, replication=1, batch_size=100
         ),
         external=ExternalSettings(
-            fin_target=ess_address, snf_target=ess_address, fcc_target=ess_address
+            fin_target=ess_address, snf_target=ess_address, compliance_target=ess_address
         ),
         pod_id="test",
     )

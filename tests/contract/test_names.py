@@ -33,7 +33,7 @@ EXPECTED_TOPICS = (
     "hub.out.fin",
     "hub.out.mx",
     "hub.net.ack",
-    "hub.fcc.decision",
+    "hub.compliance.decision",
     "hub.pay.status",
     "hub.pay.state",
 )
@@ -102,7 +102,7 @@ def test_the_pipeline_reads_the_topics_the_design_doc_says() -> None:
     """Touchpoints 5-6, 8, 13-14, 16, 18, 23, 25 of section 6."""
     assert FinParser.input_topics == (tp.IN_FIN_RAW,)
     assert MxParser.input_topics == (tp.IN_MX_RAW,)
-    assert Screening.input_topics == (tp.PAY_CANONICAL, tp.FCC_DECISION)
+    assert Screening.input_topics == (tp.PAY_CANONICAL, tp.COMPLIANCE_DECISION)
     assert Routing.input_topics == (tp.PAY_SCREENED,)
     assert Settlement.input_topics == (tp.PAY_ROUTED,)
     assert FinDispatcher.input_topics == (tp.OUT_FIN,)
@@ -131,7 +131,7 @@ def test_retention_matches_the_topic_catalogue() -> None:
     assert specs[tp.IN_FIN_RAW].retention_ms == 7 * day, "the replay source keeps 7 days"
     assert specs[tp.IN_MX_RAW].retention_ms == 7 * day
     assert specs[tp.PAY_CANONICAL].retention_ms == 3 * day
-    assert specs[tp.FCC_DECISION].retention_ms == 7 * day
+    assert specs[tp.COMPLIANCE_DECISION].retention_ms == 7 * day
     assert specs[tp.PAY_STATUS].retention_ms == 7 * day
 
 
@@ -146,7 +146,7 @@ def test_every_failable_topic_has_a_full_retry_ladder() -> None:
         tp.OUT_FIN,
         tp.OUT_MX,
         tp.NET_ACK,
-        tp.FCC_DECISION,
+        tp.COMPLIANCE_DECISION,
     ):
         for suffix in (tp.RETRY_30S_SUFFIX, tp.RETRY_5M_SUFFIX, tp.DLQ_SUFFIX):
             assert topic + suffix in names, f"{topic}{suffix} is missing"

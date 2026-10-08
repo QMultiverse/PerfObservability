@@ -1,4 +1,4 @@
-# Provisioned datasources. Nothing is clicked in the UI: performance-testing.md
+# Provisioned datasources. Nothing is clicked in the UI: docs/performance-testing.md
 # section 10 keeps dashboards and datasources as code in git.
 apiVersion: 1
 

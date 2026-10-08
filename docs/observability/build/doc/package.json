@@ -1,0 +1,12 @@
+{
+  "name": "payment-hub-observability-guide",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Builds docs/observability/Payment-Hub-Observability-Guide.docx",
+  "scripts": {
+    "build": "node build.js ../assets/shots ../assets/diagrams ../../Payment-Hub-Observability-Guide.docx && node toc.js ../../Payment-Hub-Observability-Guide.docx"
+  },
+  "dependencies": {
+    "docx": "^9.8.1"
+  }
+}

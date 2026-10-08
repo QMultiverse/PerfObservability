@@ -1,0 +1,88 @@
+# Keeps the project working on all three operating systems.
+#
+# `checks` runs the same command a developer runs (python scripts/dev.py check)
+# on Linux, macOS and Windows. macos-latest is Apple Silicon, so it also proves
+# that every Python dependency has an arm64 build.
+#
+# `stack` brings the real Compose stack up on Linux and pushes payments through
+# it. GitHub's macOS and Windows runners cannot run Linux containers, so the
+# stack itself is only exercised here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install
+        run: python scripts/dev.py install
+      - name: Stubs, ruff, mypy and tests
+        run: python scripts/dev.py check
+
+  stack:
+    name: stack smoke test (Linux)
+    runs-on: ubuntu-latest
+    needs: checks
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Both topologies are valid Compose
+        run: |
+          cp .env.example .env
+          docker compose --profile solo --profile obs --profile elk config --quiet
+          COMPOSE_PROFILES=stages,obs docker compose config --quiet
+
+      # Metrics but no ELK: a hosted runner has about 7 GB of memory.
+      - name: Use the solo and obs profiles
+        run: sed -i 's/^COMPOSE_PROFILES=.*/COMPOSE_PROFILES=solo,obs/' .env
+
+      - name: Preflight
+        run: python scripts/dev.py doctor
+
+      - name: Start the stack
+        run: python scripts/dev.py up
+
+      - name: Wait until it is ready
+        run: python scripts/dev.py ready --wait 300
+
+      - name: Push payments through it
+        run: |
+          docker compose exec -T ess python -m ess.cli batch -n 30 -r 2 \
+            --mix "pacs.008=60,MT103=30,pacs.009=10" --hit-rate 0.1 \
+            --run-id ci --wait 120s | tee batch.txt
+          # The batch command reports failures in its output, not its exit code.
+          grep -q "^batch ok" batch.txt
+
+      - name: Still ready afterwards
+        run: python scripts/dev.py ready --wait 60
+
+      - name: Logs, if anything failed
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Stop
+        if: always()
+        run: docker compose down

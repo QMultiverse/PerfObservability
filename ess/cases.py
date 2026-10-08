@@ -106,7 +106,7 @@ CASES: Final[dict[str, Case]] = {
             FLOW_MX_SNF_PACS008,
             (PACS_008,),
             "BLOCKED",
-            "FCC returns BLOCK; the payment stops at screening",
+            "Compliance returns BLOCK; the payment stops at screening",
             override=Override(block=True),
         ),
         Case(

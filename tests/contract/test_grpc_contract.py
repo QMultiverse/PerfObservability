@@ -17,7 +17,7 @@ from hub_proto.ext.v1 import networks_pb2
 from hub_proto.hub.v1 import common_pb2, hub_edge_pb2, payment_pb2
 
 from ess.control import EssControl
-from ess.emulators import FccEmulator, FinEmulator, SnfEmulator
+from ess.emulators import ComplianceEmulator, FinEmulator, SnfEmulator
 from hub.edge.server import HubComplianceService, HubInboundService, HubNetworkEventsService
 from tests.harness import Harness
 
@@ -25,12 +25,12 @@ from tests.harness import Harness
 HUB_SERVED = {
     "hub.v1.HubInbound": ("DeliverFin", "DeliverMx"),
     "hub.v1.HubNetworkEvents": ("NotifyAck", "NotifyDeliveryNotification"),
-    "hub.v1.HubCompliance": ("NotifyFccDecision",),
+    "hub.v1.HubCompliance": ("NotifyComplianceDecision",),
 }
 EXT_SERVED = {
     "ext.v1.FinGateway": ("SendMt",),
     "ext.v1.SnfGateway": ("SendMx",),
-    "ext.v1.FccScreening": ("Screen",),
+    "ext.v1.ComplianceScreening": ("Screen",),
 }
 ESS_SERVED = {
     "ess.v1.EssControl": (
@@ -50,7 +50,7 @@ IMPLEMENTATIONS = {
     "hub.v1.HubCompliance": HubComplianceService,
     "ext.v1.FinGateway": FinEmulator,
     "ext.v1.SnfGateway": SnfEmulator,
-    "ext.v1.FccScreening": FccEmulator,
+    "ext.v1.ComplianceScreening": ComplianceEmulator,
     "ess.v1.EssControl": EssControl,
 }
 
@@ -164,11 +164,11 @@ async def test_the_hub_actually_serves_its_side(hub: Harness) -> None:
         )
         assert received.received
 
-        decided = await pb.HubComplianceStub(channel).NotifyFccDecision(
-            pb.FccDecision(
+        decided = await pb.HubComplianceStub(channel).NotifyComplianceDecision(
+            pb.ComplianceDecision(
                 ref=pb.MsgRef(uetr="00000000-0000-4000-8000-000000000000"),
                 case_id="CASE-1",
-                decision=pb.FccDecision.RELEASE,
+                decision=pb.ComplianceDecision.RELEASE,
             ),
             timeout=1.0,
         )
@@ -189,7 +189,7 @@ async def test_the_ess_actually_serves_its_side(hub: Harness) -> None:
         assert accepted.status == pb.SendAccepted.ACCEPTED
         assert accepted.send_ref
 
-        result = await pb.FccScreeningStub(channel).Screen(
+        result = await pb.ComplianceScreeningStub(channel).Screen(
             pb.ScreenRequest(
                 ref=pb.MsgRef(uetr="00000000-0000-4000-8000-000000000001"),
                 parties=[pb.ScreenParty(role="DEBTOR", name="NORTHWIND TRADING LTD")],
@@ -206,15 +206,31 @@ async def test_the_ess_actually_serves_its_side(hub: Harness) -> None:
 
 # ------------------------------------------------------------- deadlines
 def test_deadlines_match_the_design_doc() -> None:
-    from hub_telemetry.grpc_telemetry import (
-        DEADLINE_DELIVER_S,
-        DEADLINE_SCREEN_S,
-        DEADLINE_SEND_S,
-    )
+    """What a service gets, with no HUB_DEADLINE_SCALE set.
 
-    assert DEADLINE_DELIVER_S == 0.200
-    assert DEADLINE_SEND_S == 0.500
-    assert DEADLINE_SCREEN_S == 1.000
+    Asked of a fresh interpreter: this suite scales its own deadlines (see
+    tests/__init__.py), so the values imported here are not the production ones.
+    """
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "HUB_DEADLINE_SCALE"}
+    code = (
+        "from hub_telemetry.grpc_telemetry import "
+        "DEADLINE_DELIVER_S, DEADLINE_NOTIFY_S, DEADLINE_SEND_S, DEADLINE_SCREEN_S; "
+        "print(DEADLINE_DELIVER_S, DEADLINE_NOTIFY_S, DEADLINE_SEND_S, DEADLINE_SCREEN_S)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    )
+    assert out.stdout.split() == ["0.2", "0.2", "0.5", "1.0"]
+
+
+def test_the_test_suite_scales_its_deadlines() -> None:
+    from hub_telemetry.grpc_telemetry import DEADLINE_DELIVER_S
+
+    assert DEADLINE_DELIVER_S > 0.200, "tests must not depend on this machine's speed"
 
 
 def test_only_unavailable_and_deadline_exceeded_are_retried() -> None:

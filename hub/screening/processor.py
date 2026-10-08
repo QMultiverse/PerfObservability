@@ -1,15 +1,15 @@
-"""Screening: ``hub.pay.canonical`` + ``hub.fcc.decision`` to ``hub.pay.screened``.
+"""Screening: ``hub.pay.canonical`` + ``hub.compliance.decision`` to ``hub.pay.screened``.
 
 The one stage with a synchronous call off the critical path's own topic: it
-builds a screening request from the canonical payment and waits for FCC, with a
+builds a screening request from the canonical payment and waits for the compliance service, with a
 1 s deadline.
 
 Three outcomes:
 
 * ``NO_HIT`` — the payment moves on to ``hub.pay.screened``, T3 stamped.
 * ``HIT_PENDING`` — the payment is parked in HELD in the local state store.
-  Minutes later FCC calls ``NotifyFccDecision``; the edge writes it to
-  ``hub.fcc.decision``, this stage reads it and resumes from the release.
+  Minutes later the compliance service calls ``NotifyComplianceDecision``; the edge writes it to
+  ``hub.compliance.decision``, this stage reads it and resumes from the release.
 * ``BLOCK`` — terminal. The payment is BLOCKED and goes no further.
 
 **Cover pairs are matched here.** Both legs share the UETR, so Kafka has put
@@ -23,7 +23,7 @@ HELD in one store. If that ownership moves, this module and
 
 ``Screen`` is not part of the Kafka transaction. A crash after the call and
 before the commit means the payment is screened again on redelivery, which is
-why FCC de-duplicates on (UETR, message type, direction) and why we check
+why the compliance service de-duplicates on (UETR, message type, direction) and why we check
 ``stages_done`` before calling.
 """
 
@@ -38,7 +38,7 @@ from hub_model import topics as tp
 from hub_model.envelope import STAGE_SCREENED, advance, now_ns
 from hub_model.flows import get_flow
 from hub_model.proto import (
-    FccDecisionRecord,
+    ComplianceDecisionRecord,
     PaymentEnvelope,
     ScreenParty,
     ScreenRequest,
@@ -63,7 +63,7 @@ class Screening(Processor):
     name = SERVICE_NAME
     stage = STAGE_SCREENED
     group_id = tp.CG_SCREENING
-    input_topics = (tp.PAY_CANONICAL, tp.FCC_DECISION)
+    input_topics = (tp.PAY_CANONICAL, tp.COMPLIANCE_DECISION)
     # HELD payments and half-matched cover pairs live in the local store; the
     # compacted state topic is what rebuilds them after a restart.
     reads_state = True
@@ -71,17 +71,17 @@ class Screening(Processor):
     def __init__(self, settings: ServiceSettings, events: Events) -> None:
         super().__init__(settings, events)
         self._channel: grpc.aio.Channel | None = None
-        self._stub: pb.FccScreeningStub | None = None
+        self._stub: pb.ComplianceScreeningStub | None = None
 
     # ------------------------------------------------------------- client
-    def stub(self) -> pb.FccScreeningStub:
+    def stub(self) -> pb.ComplianceScreeningStub:
         if self._stub is None:
             self._channel = channel(
-                self.settings.external.fcc_target,
+                self.settings.external.compliance_target,
                 self.events,
                 strip_context=self.settings.external.real_networks,
             )
-            self._stub = pb.FccScreeningStub(self._channel)
+            self._stub = pb.ComplianceScreeningStub(self._channel)
         return self._stub
 
     async def close(self) -> None:
@@ -92,7 +92,7 @@ class Screening(Processor):
 
     # ------------------------------------------------------------ dispatch
     async def handle(self, record: Record, out: Outbox) -> None:
-        if record.topic.startswith(tp.FCC_DECISION):
+        if record.topic.startswith(tp.COMPLIANCE_DECISION):
             await self._handle_decision(record, out)
         else:
             await self._handle_payment(record, out)
@@ -118,7 +118,7 @@ class Screening(Processor):
             # BLOCKED is terminal: a status event and the state record, but
             # nothing on hub.pay.screened, so the payment goes no further.
             stages = self.mark(blocked)
-            out.emit_status(blocked, reason="FCC returned BLOCK")
+            out.emit_status(blocked, reason="Compliance returned BLOCK")
             out.emit_state(blocked, stages=stages)
             return
 
@@ -126,13 +126,13 @@ class Screening(Processor):
             env.screening.outcome = pb.Screening.HIT_PENDING
             held = advance(env, pb.HELD)
             self.store.hold(held, result.case_id)
-            out.emit_status(held, reason=f"FCC hit, case {result.case_id}")
+            out.emit_status(held, reason=f"Compliance hit, case {result.case_id}")
             out.emit_state(held, stages=())
             metrics.held_payments.labels(SERVICE_NAME).set(self.store.held_count())
             return
 
         env.screening.outcome = pb.Screening.NO_HIT
-        await self._release(env, out, reason="FCC returned NO_HIT")
+        await self._release(env, out, reason="Compliance returned NO_HIT")
 
     async def _screen(self, env: PaymentEnvelope) -> ScreenResult:
         request = build_screen_request(env)
@@ -142,26 +142,27 @@ class Screening(Processor):
         except grpc.aio.AioRpcError as exc:
             code = exc.code()
             if code in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
-                # FCC is down or slow. The payment is not wrong; try again.
+                # Compliance screening is down or slow. The payment is not wrong; try again.
                 raise RetryableError(
-                    f"FCC unreachable: {code.name}", code="FCC_UNAVAILABLE"
+                    f"Compliance screening unreachable: {code.name}", code="COMPLIANCE_UNAVAILABLE"
                 ) from exc
             if code == grpc.StatusCode.INVALID_ARGUMENT:
                 raise PermanentError(
-                    f"FCC rejected the request: {exc.details()}", code="FCC_INVALID"
+                    f"Compliance screening rejected the request: {exc.details()}",
+                    code="COMPLIANCE_INVALID",
                 ) from exc
             raise RetryableError(
-                f"FCC error {code.name}: {exc.details()}", code="FCC_ERROR"
+                f"Compliance screening error {code.name}: {exc.details()}", code="COMPLIANCE_ERROR"
             ) from exc
 
     # ---------------------------------------------------------- the decision
     async def _handle_decision(self, record: Record, out: Outbox) -> None:
-        decision = FccDecisionRecord()
+        decision = ComplianceDecisionRecord()
         try:
             decision.ParseFromString(record.value)
         except Exception as exc:
             raise PermanentError(
-                f"undecodable FccDecisionRecord: {exc}", code="FCC_BAD_DECISION"
+                f"undecodable ComplianceDecisionRecord: {exc}", code="COMPLIANCE_BAD_DECISION"
             ) from exc
 
         held = self.store.held(decision.ref.uetr)
@@ -239,7 +240,7 @@ class Screening(Processor):
 
 
 def build_screen_request(env: PaymentEnvelope) -> ScreenRequest:
-    """Build the FCC request.
+    """Build the screening request.
 
     Names and amounts go in the *request*, never in baggage — they are exactly
     what section 9 forbids putting on every hop.

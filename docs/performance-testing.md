@@ -45,7 +45,7 @@ The Payment Hub (the Hub), its gRPC interfaces and its internal Kafka design are
 
 **What the framework relies on from the platform**
 
-- **gRPC is the only boundary.** The External Systems Simulator (ESS) plays FIN, SnF and FCC by calling `DeliverFin`, `DeliverMx`, `NotifyAck` and `NotifyFccDecision` on the Hub, and by serving `SendMt`, `SendMx` and `Screen` (platform sections 3–4, simulator in section 8). The framework never writes to the Hub's Kafka.
+- **gRPC is the only boundary.** The External Systems Simulator (ESS) plays FIN, SnF and compliance screening by calling `DeliverFin`, `DeliverMx`, `NotifyAck` and `NotifyComplianceDecision` on the Hub, and by serving `SendMt`, `SendMx` and `Screen` (platform sections 3–4, simulator in section 8). The framework never writes to the Hub's Kafka.
 - **One read-only tap:** the status tracker reads `hub.pay.status` with its own consumer group and a read-only ACL (platform section 7).
 - **UETR on every call and record**, plus `flow`, `run-id` and `traceparent` in gRPC metadata.
 - **Seven timestamps per payment** (platform section 5):
@@ -55,7 +55,7 @@ The Payment Hub (the Hub), its gRPC interfaces and its internal Kafka design are
 | T0 | Inbound message sent (`DeliverFin` / `DeliverMx`) | ESS recorder (intended send time) |
 | T1 | Hub replies ACCEPTED (message durable in Kafka) | ESS recorder |
 | T2 | Canonical payment written (parse + validate done) | Status tracker |
-| T3 | Screening reply returned | ESS recorder (FCC side) |
+| T3 | Screening reply returned | ESS recorder (compliance side) |
 | T4 | Outbound handed off (`SendMt` / `SendMx` received) | ESS recorder |
 | T5 | ACK / NAK sent back (`NotifyAck`) | ESS recorder |
 | T6 | Status COMPLETED / REJECTED | Status tracker |
@@ -85,7 +85,7 @@ A payment's format is the format it **arrived** in. An MT103 that leaves as pacs
 | --- | --- | --- |
 | T1 − T0 | gRPC ingress + durable Kafka write | Slightly (payload size) |
 | T2 − T1 | Parse, validate, map to canonical | **Yes — the main format-specific cost** |
-| T3 − T2 | FCC screening round trip | Somewhat (MX has more structured party data) |
+| T3 − T2 | Compliance screening round trip | Somewhat (MX has more structured party data) |
 | T4 − T3 | Route, settle, dispatch | Should be equal; if not, investigate |
 | T5 − T4 | Mock network ACK delay | Set by the ESS profile, excluded from Hub results |
 | T6 − T5 | ACK matching and completion | Should be equal |
@@ -106,7 +106,7 @@ A payment's format is the format it **arrived** in. An MT103 that leaves as pacs
 | MT-only ramp | MT flows only, stepped until an SLO breaks | MT ceiling (TPS) and MT cost per 1k TPS |
 | MX-only ramp | MX flows only, stepped until an SLO breaks | MX ceiling and MX cost per 1k TPS |
 | Mixed at target ratio | Expected MT:MX split at peak | Whether both formats meet their own SLOs together |
-| Interference | MX held steady at target; MT ramped (then the reverse) | Whether one format's load degrades the other, and where they contend (FCC, database, shared topics) |
+| Interference | MX held steady at target; MT ramped (then the reverse) | Whether one format's load degrades the other, and where they contend (compliance screening, database, shared topics) |
 
 **MT vs MX scorecard (one per run, filled by the analyser)**
 
@@ -190,7 +190,7 @@ The framework has 14 components. Five are written in-house in Python (perfctl, m
 | Control | `perfctl` | One command that runs the whole lifecycle in 3.3 | Scenario name, environment | Run ID, run manifest, exit code | Python (Typer, Pydantic), bash wrappers, kubectl / Helm | **Build** |
 | Load | Message factory | Pre-builds valid MT and MX messages into data pools before the run | Workload profile, seed, reference-data pool | Parquet pools of ready messages (UETR, flow, bytes) | Python (lxml, xmlschema, Faker, schwifty) | **Build** |
 | Load | paygen — inbound load driver | Delivers inbound traffic at the target rate by calling `DeliverFin` / `DeliverMx` | Message pools, load shape | gRPC calls to the Hub, T0 / T1 stamps | Python paygen (asyncio, grpc.aio, uvloop) | **Build** |
-| Load | External Systems Simulator (platform) | Plays FIN, SnF and FCC: answers `SendMt`, `SendMx`, `Screen`, and calls back with `NotifyAck` / `NotifyFccDecision` | Calls from the Hub, behaviour profile | Replies, callbacks, T3 / T4 / T5 stamps | Python `grpc.aio` server | Provided by the platform; run in performance mode |
+| Load | External Systems Simulator (platform) | Plays FIN, SnF and compliance screening: answers `SendMt`, `SendMx`, `Screen`, and calls back with `NotifyAck` / `NotifyComplianceDecision` | Calls from the Hub, behaviour profile | Replies, callbacks, T3 / T4 / T5 stamps | Python `grpc.aio` server | Provided by the platform; run in performance mode |
 | SUT | Payment Hub | The system being tested | Inbound gRPC | Outbound gRPC, status events | Your stack | — |
 | Capture | ESS recorder | Writes one row per gRPC call the ESS makes or receives | Driver and responder events | Per-UETR Parquet rows, Prometheus counters | Python (pyarrow, prometheus-client), part of the ESS | **Build** |
 | Capture | Status tracker | Reads the Hub's status topic to get T2 and T6 for every UETR | `hub.pay.status` (read-only consumer group) | Per-UETR Parquet rows | Python, confluent-kafka | **Build** (small) |
@@ -210,8 +210,8 @@ The External Systems Simulator (ESS) is built and owned by the platform (platfor
 | Part | Runs as | Key design choices |
 | --- | --- | --- |
 | Inbound driver | paygen pods: one controller + one worker process per core (section 6) | Per-flow runners call `DeliverFin` / `DeliverMx` at the intended send time (open model). Rates are set from the CLI and can be changed live with `paygen ctl`. Messages stream from the pre-built Parquet pools, so no XML is built during the run. |
-| Responder | `grpc.aio` async server, 2+ replicas behind a Kubernetes Service | Serves `FinGateway`, `SnfGateway`, `FccScreening`, `EssControl`. Replies after a delay drawn from the behaviour profile. Schedules `NotifyAck` and `NotifyFccDecision` callbacks on an async timer queue. |
-| Behaviour profile | YAML in the scenario folder, applied through `EssControl.SetProfile` | Per network: accept latency, ACK delay distribution, NAK rate. For FCC: screen latency, hit rate, block rate, decision delay. Can be changed mid-run for fault scenarios, e.g. "FCC slow for 5 minutes". |
+| Responder | `grpc.aio` async server, 2+ replicas behind a Kubernetes Service | Serves `FinGateway`, `SnfGateway`, `ComplianceScreening`, `EssControl`. Replies after a delay drawn from the behaviour profile. Schedules `NotifyAck` and `NotifyComplianceDecision` callbacks on an async timer queue. |
+| Behaviour profile | YAML in the scenario folder, applied through `EssControl.SetProfile` | Per network: accept latency, ACK delay distribution, NAK rate. For compliance screening: screen latency, hit rate, block rate, decision delay. Can be changed mid-run for fault scenarios, e.g. "compliance screening slow for 5 minutes". |
 | Recorder | Library inside both parts | Appends one row per call (UETR, flow, format, method, direction, timestamp in ns, outcome) to an in-memory Arrow buffer. It flushes Parquet files to object storage every 30 s, and exposes Prometheus counters for live dashboards. No network hop per message, so recording doesn't slow the ESS. |
 | Idempotency cache | In-process LRU per responder replica | De-duplicates repeated `SendMt` / `SendMx` / `Screen` calls on (UETR, message type), and counts them as duplicates. |
 
@@ -231,7 +231,7 @@ A run is one command, `perfctl run --scenario S02_bau --env perf1`, which walks 
 | 2. Pre-flight | Check Hub version, Kafka partitions and replicas, pod limits, and NTP clock skew (< 1 ms) against the manifest. Stop if they don't match. | kubectl, Kafka admin API, chrony | Parity report |
 | 3. Prepare data | Build or reuse message pools for this seed and mix | Message factory | Parquet pools on S3 |
 | 4. Deploy framework | `helm upgrade` the ESS driver, ESS responder and status tracker with the run ID | Helm, Kubernetes | Running pods |
-| 5. Configure mock | Push FIN, SnF and FCC behaviour profiles | `EssControl.SetProfile` | Profiles applied |
+| 5. Configure mock | Push FIN, SnF and compliance screening behaviour profiles | `EssControl.SetProfile` | Profiles applied |
 | 6. Mark start | Write a run annotation, and tag the warm-up window | Grafana API | Annotation, window markers |
 | 7. Drive load | Start paygen with the flows and load shape; watch generator health; apply mid-run faults if the scenario has any | paygen, EssControl, Chaos Mesh | Load applied, live dashboards |
 | 8. Drain and collect | Stop load, wait until every UETR reaches a terminal state or times out; flush recorder and tracker; snapshot key Prometheus queries | ESS recorder, tracker, Prometheus API | Parquet results on S3 |
@@ -592,11 +592,11 @@ Before the framework exists, five faults were injected by hand on the local stac
 
 | Scenario | Injected with | Symptom first seen on | Cause found on | What it found |
 | --- | --- | --- | --- | --- |
-| 1. Slow dependency | ESS FCC profile: `Screen` lognormal p50 300 ms, p99 1.5 s | E2E Latency (Simulator), M1/M2 gap | IO Wait Ratio (screening near 0), gRPC client call duration (`Screen`) | Latency rose ~40x, far beyond the dependency's own slowdown: screening calls FCC one record at a time inside one transaction, so a slow call grows the batch and every payment in it waits for the whole batch. |
+| 1. Slow dependency | ESS compliance profile: `Screen` lognormal p50 300 ms, p99 1.5 s | E2E Latency (Simulator), M1/M2 gap | IO Wait Ratio (screening near 0), gRPC client call duration (`Screen`) | Latency rose ~40x, far beyond the dependency's own slowdown: screening calls the compliance service one record at a time inside one transaction, so a slow call grows the batch and every payment in it waits for the whole batch. |
 | 2. Slow database | `docker update --cpus 0.02 hub-postgres` | Consumer Lag (Broker), `cg-db-sink` only | JDBC Calls (ceiling), JDBC idle connections (pinned active) | Customers saw nothing while PostgreSQL ran 64 s behind: *completed* is not *persisted*. At 0.1 CPU nothing happened, which measured the database's headroom. |
 | 3. Network outage | ESS SnF outage for 60 s | gRPC client calls (`SendMx UNAVAILABLE`) | Retry topics on Broker records in; per-UETR journey in Kibana | The retry ladder works, but a retried payment stayed FAILED after it completed (fixed: FAILED is transient, see `supersedes`). The 30 s tier really takes 30-60 s. |
 | 4. Slow broker | `docker update --cpus 0.5 hub-kafka` | E2E Latency (Simulator), edge deadline misses | Streams commit latency vs Process latency (~150 ms vs ~3 ms) | Throughput held and lag stayed near zero while latency rose 10x: lag-based alerting cannot see this. Client delivery errors over-count failures, because a timed-out `Deliver*` was often written durably. |
-| 5. Memory growth | ESS FCC: 30 % hits, decision after 60 min | (see the run notes) | Kafka stream number of keys per instance, memory rows | Soak behaviour of payments held for an FCC decision. |
+| 5. Memory growth | ESS compliance profile: 30 % hits, decision after 60 min | Used Memory - Resident (RSS): a straight line up, 125 MB to 217 MB in 15 minutes | Kafka stream number of keys per instance (`working` series), Allocated blocks | Two unbounded leaks, about 37 KB a payment in total. Held payments (~10 KB each) stay until a decision arrives; and, in every run, the parsers, routing, settlement and dispatchers keep every payment they have processed (~28 KB each). Out of memory after about 90 minutes at 3 payments a second. Latency SLOs pass throughout. Not yet fixed. |
 
 Cross-cutting findings:
 
@@ -756,6 +756,6 @@ The highlighted gate is the turning point: from there, every nightly and release
 **Shared with the platform document (answers affect both)**
 
 - [ ] Is the business definition of a completed payment the outbound handoff, the network ACK, or the final pacs.002 status?
-- [ ] Is the real FCC call synchronous on the payment path, or does the SUT publish for screening and wait for a result event?
+- [ ] Is the real compliance screening call synchronous on the payment path, or does the SUT publish for screening and wait for a result event?
 - [ ] What is the expected MT vs MX volume split now that coexistence has ended, and how much MT traffic comes through Swift's contingency conversion or in-flow translation?
 - [ ] In production, will inbound MT/MX reach the Payment Hub through a gRPC edge as designed in the platform document, or through an MQ / Alliance Access adapter that the ESS should also emulate?
